@@ -1,0 +1,5 @@
+# Build artifacts
+GLS_Project/Builds/
+
+# macOS junk
+.DS_Store
