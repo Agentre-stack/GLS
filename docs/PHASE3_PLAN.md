@@ -4,6 +4,8 @@ Phase 3 focuses on shipping the usability, visualization, and advanced DSP featu
 
 **Progress:** Current Phase 3 cockpit/DSP/preset sweep sits at 100% for the pairs listed below (latest full build + vst3validator run completed). Continue picking the next pair using the same two-by-two cadence.
 
+> **Hardening plan:** For competitor-level automation, visual regression, UX consistency, anti-piracy protections, and release/QA gates, follow `docs/HARDENING_PLAN.md` alongside this backlog.
+
 ## Cross-Cutting Objectives
 1. **UI polish & preset coverage** — Several plugins still need styled GUIs and curated presets (Channel Pilot calls out UI + presets in `docs/plugins/GLS.ChannelPilot.md:30-33`; Parallel Press wants genre presets per `docs/plugins/GLS.ParallelPress.md:29-35`; Signal Tracer needs tap labeling/presets per `docs/plugins/UTL.SignalTracer.md:24-31`). Provide a shared look-and-feel kit plus a preset-authoring sprint.
 2. **Metering & visualization** — Mix and analysis tools lack the meters they describe (Parallel Press GR meter per `docs/plugins/GLS.ParallelPress.md:29-35`; Ambience Evolver LUFS/profile indicators per `docs/plugins/AEV.AmbienceEvolverSuite.md:27-33`; Signal Tracer oscilloscope + correlation views per `docs/plugins/UTL.SignalTracer.md:24-31`). Build reusable JUCE widgets (GR, LUFS, scopes) and hook them into each processor.
