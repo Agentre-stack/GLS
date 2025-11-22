@@ -1,7 +1,7 @@
 #include "EQGuitarBodyEQAudioProcessor.h"
 
 EQGuitarBodyEQAudioProcessor::EQGuitarBodyEQAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "GUITAR_BODY_EQ", createParameterLayout())
@@ -59,10 +59,11 @@ void EQGuitarBodyEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
     ensureFilterState (numChannels);
     updateFilters (bodyFreq, bodyGain, mudCutFreq, pickAttack, airLift);
 
+    juce::dsp::AudioBlock<float> block (buffer);
     for (int ch = 0; ch < numChannels; ++ch)
     {
-        juce::dsp::AudioBlock<float> block (buffer.getArrayOfWritePointers()[ch], 1, (size_t) numSamples);
-        juce::dsp::ProcessContextReplacing<float> ctx (block);
+        auto channelBlock = block.getSingleChannelBlock ((size_t) ch);
+        juce::dsp::ProcessContextReplacing<float> ctx (channelBlock);
         bodyFilters[ch].process (ctx);
         mudFilters[ch].process (ctx);
         pickFilters[ch].process (ctx);
@@ -214,4 +215,9 @@ void EQGuitarBodyEQAudioProcessor::updateFilters (float bodyFreq, float bodyGain
         filter.coefficients = pickCoeffs;
     for (auto& filter : airFilters)
         filter.coefficients = airCoeffs;
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new EQGuitarBodyEQAudioProcessor();
 }

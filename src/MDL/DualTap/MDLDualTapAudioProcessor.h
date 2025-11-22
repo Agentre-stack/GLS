@@ -1,8 +1,9 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "../../DualPrecisionAudioProcessor.h"
 
-class MDLDualTapAudioProcessor : public juce::AudioProcessor
+class MDLDualTapAudioProcessor : public DualPrecisionAudioProcessor
 {
 public:
     MDLDualTapAudioProcessor();
@@ -24,7 +25,7 @@ public:
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    const juce::String getProgramName (int index) override { return index == 0 ? juce::String (JucePlugin_Name " 01") : juce::String(); }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -45,6 +46,8 @@ private:
     juce::AudioBuffer<float> dryBuffer;
     double currentSampleRate = 44100.0;
     juce::uint32 lastBlockSize = 512;
+    double tapSpecSampleRate = 0.0;
+    juce::uint32 tapSpecBlockSize = 0;
 
     void ensureStateSize (int numChannels);
     void updateFilters (float hpf, float lpf);

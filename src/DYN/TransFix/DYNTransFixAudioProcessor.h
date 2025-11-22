@@ -1,8 +1,12 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "../../DualPrecisionAudioProcessor.h"
+#include "../../ui/GoodluckLookAndFeel.h"
+#include <array>
+#include <vector>
 
-class DYNTransFixAudioProcessor : public juce::AudioProcessor
+class DYNTransFixAudioProcessor : public DualPrecisionAudioProcessor
 {
 public:
     DYNTransFixAudioProcessor();
@@ -21,10 +25,10 @@ public:
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override { return 0.0; }
 
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    int getNumPrograms() override;
+    int getCurrentProgram() override { return currentPreset; }
+    void setCurrentProgram (int) override;
+    const juce::String getProgramName (int index) override;
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -46,10 +50,21 @@ private:
 
     std::vector<ChannelState> channelStates;
     double currentSampleRate = 44100.0;
+    juce::uint32 lastBlockSize = 512;
     juce::AudioBuffer<float> dryBuffer;
+    int currentPreset = 0;
 
     void ensureStateSize();
     float applyTilt (float sample, float freq, float amount);
+    void applyPreset (int index);
+
+    struct Preset
+    {
+        const char* name;
+        std::vector<std::pair<const char*, float>> params;
+    };
+
+    static const std::array<Preset, 3> presetBank;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DYNTransFixAudioProcessor)
 };
@@ -66,24 +81,34 @@ public:
 private:
     DYNTransFixAudioProcessor& processorRef;
 
+    juce::Colour accentColour;
+    gls::ui::GoodluckLookAndFeel lookAndFeel;
+    gls::ui::GoodluckHeader headerComponent;
+    gls::ui::GoodluckFooter footerComponent;
+
     juce::Slider attackSlider;
     juce::Slider sustainSlider;
     juce::Slider tiltFreqSlider;
     juce::Slider tiltAmountSlider;
     juce::ComboBox detectModeBox;
     juce::Slider mixSlider;
+    juce::Slider inputTrimSlider;
+    juce::Slider outputTrimSlider;
+    juce::ToggleButton bypassButton { "Soft Bypass" };
 
     using SliderAttachment   = juce::AudioProcessorValueTreeState::SliderAttachment;
     using ComboBoxAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
+    using ButtonAttachment   = juce::AudioProcessorValueTreeState::ButtonAttachment;
 
-    std::unique_ptr<SliderAttachment> attackAttachment;
-    std::unique_ptr<SliderAttachment> sustainAttachment;
-    std::unique_ptr<SliderAttachment> tiltFreqAttachment;
-    std::unique_ptr<SliderAttachment> tiltAmountAttachment;
+    std::vector<std::unique_ptr<SliderAttachment>> sliderAttachments;
     std::unique_ptr<ComboBoxAttachment> detectModeAttachment;
-    std::unique_ptr<SliderAttachment> mixAttachment;
+    std::unique_ptr<ButtonAttachment> buttonAttachment;
 
-    void initSlider (juce::Slider& slider, const juce::String& label);
+    std::vector<std::unique_ptr<juce::Label>> labels;
+
+    void initSlider (juce::Slider& slider, const juce::String& label, bool macro = false);
+    void initToggle (juce::ToggleButton& toggle);
+    void layoutLabels();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DYNTransFixAudioProcessorEditor)
 };

@@ -1,8 +1,9 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "../../DualPrecisionAudioProcessor.h"
 
-class MDLTapeStepAudioProcessor : public juce::AudioProcessor
+class MDLTapeStepAudioProcessor : public DualPrecisionAudioProcessor
 {
 public:
     MDLTapeStepAudioProcessor();
@@ -24,7 +25,7 @@ public:
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    const juce::String getProgramName (int index) override { return index == 0 ? juce::String (JucePlugin_Name " 01") : juce::String(); }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -50,6 +51,8 @@ private:
 
     double currentSampleRate = 44100.0;
     juce::uint32 lastBlockSize = 512;
+    double lineSpecSampleRate = 0.0;
+    juce::uint32 lineSpecBlockSize = 0;
     juce::Random random;
 
     void ensureStateSize (int numChannels);

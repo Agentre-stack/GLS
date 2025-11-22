@@ -12,7 +12,7 @@ constexpr auto paramMix    = "mix";
 }
 
 PITDoubleStrikeAudioProcessor::PITDoubleStrikeAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor (BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "PIT_DOUBLE_STRIKE", createParameterLayout())
@@ -21,8 +21,20 @@ PITDoubleStrikeAudioProcessor::PITDoubleStrikeAudioProcessor()
 
 void PITDoubleStrikeAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = juce::jmax (sampleRate, 44100.0);
-    dryBuffer.setSize (getTotalNumOutputChannels(), samplesPerBlock);
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    const auto totalChannels = juce::jmax (2, getTotalNumOutputChannels());
+    const auto blockSize = juce::jmax (1, samplesPerBlock);
+
+    dryBuffer.setSize (totalChannels, blockSize);
+    wetBuffer.setSize (totalChannels, blockSize);
+    voiceABuffer.setSize (totalChannels, blockSize);
+    voiceBBuffer.setSize (totalChannels, blockSize);
+
+    voiceAShifter.prepare (currentSampleRate, totalChannels);
+    voiceBShifter.prepare (currentSampleRate, totalChannels);
+    voiceAShifter.reset();
+    voiceBShifter.reset();
+
     hpfFilters.clear();
     lpfFilters.clear();
 }
@@ -39,35 +51,65 @@ void PITDoubleStrikeAudioProcessor::processBlock (juce::AudioBuffer<float>& buff
 
     ensureState (buffer.getNumChannels(), buffer.getNumSamples());
     dryBuffer.makeCopyOf (buffer, true);
+    voiceABuffer.makeCopyOf (buffer, true);
+    voiceBBuffer.makeCopyOf (buffer, true);
+    wetBuffer.clear();
 
-    const auto hpf   = apvts.getRawParameterValue (paramHPF)->load();
-    const auto lpf   = apvts.getRawParameterValue (paramLPF)->load();
-    const auto spread= apvts.getRawParameterValue (paramSpread)->load();
-    const auto mix   = juce::jlimit (0.0f, 1.0f, apvts.getRawParameterValue (paramMix)->load());
-
-    juce::ignoreUnused (apvts.getRawParameterValue (paramVoiceA)->load());
-    juce::ignoreUnused (apvts.getRawParameterValue (paramVoiceB)->load());
-    juce::ignoreUnused (apvts.getRawParameterValue (paramDetune)->load());
+    const auto voiceA = apvts.getRawParameterValue (paramVoiceA)->load();
+    const auto voiceB = apvts.getRawParameterValue (paramVoiceB)->load();
+    const auto detune = apvts.getRawParameterValue (paramDetune)->load();
+    const auto hpf    = apvts.getRawParameterValue (paramHPF)->load();
+    const auto lpf    = apvts.getRawParameterValue (paramLPF)->load();
+    const auto spread = apvts.getRawParameterValue (paramSpread)->load();
+    const auto mix    = juce::jlimit (0.0f, 1.0f, apvts.getRawParameterValue (paramMix)->load());
 
     updateFilters (hpf, lpf);
+
+    const auto ratioFromPitch = [] (float semitones)
+    {
+        return std::pow (2.0f, semitones / 12.0f);
+    };
+
+    const float ratioA = ratioFromPitch (voiceA + detune * 0.5f / 100.0f);
+    const float ratioB = ratioFromPitch (voiceB - detune * 0.5f / 100.0f);
+
+    voiceAShifter.process (voiceABuffer, ratioA);
+    voiceBShifter.process (voiceBBuffer, ratioB);
 
     const auto [voiceAL, voiceAR] = panToGains (-spread);
     const auto [voiceBL, voiceBR] = panToGains ( spread);
 
+    for (int i = 0; i < buffer.getNumSamples(); ++i)
+    {
+        const float voiceASample = 0.5f * (voiceABuffer.getSample (0, i)
+                                           + (voiceABuffer.getNumChannels() > 1
+                                                  ? voiceABuffer.getSample (1, i)
+                                                  : voiceABuffer.getSample (0, i)));
+        const float voiceBSample = 0.5f * (voiceBBuffer.getSample (0, i)
+                                           + (voiceBBuffer.getNumChannels() > 1
+                                                  ? voiceBBuffer.getSample (1, i)
+                                                  : voiceBBuffer.getSample (0, i)));
+
+        const float wetL = voiceASample * voiceAL + voiceBSample * voiceBL;
+        const float wetR = voiceASample * voiceAR + voiceBSample * voiceBR;
+        wetBuffer.setSample (0, i, wetL);
+        if (wetBuffer.getNumChannels() > 1)
+            wetBuffer.setSample (1, i, wetR);
+    }
+
     for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
     {
-        auto* data = buffer.getWritePointer (ch);
+        auto* data = wetBuffer.getWritePointer (ch);
         auto& hp = hpfFilters[(size_t) ch];
         auto& lp = lpfFilters[(size_t) ch];
-        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        for (int i = 0; i < wetBuffer.getNumSamples(); ++i)
             data[i] = lp.processSample (hp.processSample (data[i]));
     }
 
     for (int i = 0; i < buffer.getNumSamples(); ++i)
     {
-        float wetL = dryBuffer.getSample (0, i) * voiceAL + dryBuffer.getSample (1, i) * voiceBL;
-        float wetR = dryBuffer.getSample (0, i) * voiceAR + dryBuffer.getSample (1, i) * voiceBR;
-
+        const float wetL = wetBuffer.getSample (0, i);
+        const float wetR = wetBuffer.getNumChannels() > 1 ? wetBuffer.getSample (1, i) : wetL;
         const float dryL = dryBuffer.getSample (0, i);
         const float dryR = dryBuffer.getNumChannels() > 1 ? dryBuffer.getSample (1, i) : dryL;
 
@@ -81,6 +123,12 @@ void PITDoubleStrikeAudioProcessor::ensureState (int numChannels, int numSamples
 {
     if (dryBuffer.getNumChannels() != numChannels || dryBuffer.getNumSamples() != numSamples)
         dryBuffer.setSize (numChannels, numSamples, false, false, true);
+    if (wetBuffer.getNumChannels() != numChannels || wetBuffer.getNumSamples() != numSamples)
+        wetBuffer.setSize (numChannels, numSamples, false, false, true);
+    if (voiceABuffer.getNumChannels() != numChannels || voiceABuffer.getNumSamples() != numSamples)
+        voiceABuffer.setSize (numChannels, numSamples, false, false, true);
+    if (voiceBBuffer.getNumChannels() != numChannels || voiceBBuffer.getNumSamples() != numSamples)
+        voiceBBuffer.setSize (numChannels, numSamples, false, false, true);
 
     auto ensureFilters = [numChannels](auto& filters)
     {

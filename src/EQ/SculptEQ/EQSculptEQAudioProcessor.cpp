@@ -1,7 +1,7 @@
 #include "EQSculptEQAudioProcessor.h"
 
 EQSculptEQAudioProcessor::EQSculptEQAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "SCULPT_EQ", createParameterLayout())
@@ -258,4 +258,9 @@ void EQSculptEQAudioProcessor::updateFilters (float hpf, float lpf,
         for (auto& filter : bandFilters[i])
             filter.coefficients = coeffs;
     }
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new EQSculptEQAudioProcessor();
 }

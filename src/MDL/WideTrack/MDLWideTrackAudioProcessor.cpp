@@ -1,16 +1,28 @@
 #include "MDLWideTrackAudioProcessor.h"
 
 MDLWideTrackAudioProcessor::MDLWideTrackAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor (BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "WIDE_TRACK", createParameterLayout())
 {
 }
 
-void MDLWideTrackAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerBlock*/)
+void MDLWideTrackAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = juce::jmax (sampleRate, 44100.0);
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    lastBlockSize = (juce::uint32) juce::jmax (1, samplesPerBlock);
+    const auto channels = juce::jmax (1, getTotalNumOutputChannels());
+    dryBuffer.setSize (channels, (int) lastBlockSize);
+    sumDiffBuffer.setSize (2, (int) lastBlockSize);
+
+    const int maxDelay = (int) std::ceil (currentSampleRate * 0.02);
+    sideDelay.setMaximumDelayInSamples (juce::jmax (1, maxDelay));
+    juce::dsp::ProcessSpec spec { currentSampleRate, lastBlockSize, 1 };
+    sideDelay.prepare (spec);
+    sideDelay.reset();
+    delaySpecSampleRate = currentSampleRate;
+    delaySpecBlockSize = lastBlockSize;
 }
 
 void MDLWideTrackAudioProcessor::releaseResources()
@@ -22,51 +34,78 @@ void MDLWideTrackAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 {
     juce::ScopedNoDenormals noDenormals;
 
-    auto totalIn  = getTotalNumInputChannels();
-    auto totalOut = getTotalNumOutputChannels();
-    for (int ch = totalIn; ch < totalOut; ++ch)
-        buffer.clear (ch, 0, buffer.getNumSamples());
-
-    auto get = [this](const char* id) { return apvts.getRawParameterValue (id)->load(); };
-
-    const float width     = juce::jlimit (0.0f, 2.0f, get ("width"));
-    const float spreadMs  = juce::jlimit (0.0f, 5.0f, get ("delay_spread"));
-    const float hfPreserve= juce::jlimit (0.0f, 1.0f, get ("hf_preserve"));
-    const float monoSafe  = juce::jlimit (0.0f, 1.0f, get ("mono_safe"));
-
+    const auto totalIn  = getTotalNumInputChannels();
+    const auto totalOut = getTotalNumOutputChannels();
     const int numSamples = buffer.getNumSamples();
+    for (int ch = totalIn; ch < totalOut; ++ch)
+        buffer.clear (ch, 0, numSamples);
+
+    const auto numChannels = buffer.getNumChannels();
+    if (numChannels == 0 || numSamples == 0)
+        return;
+
+    const auto getParam = [this](const char* id) { return apvts.getRawParameterValue (id)->load(); };
+
+    float width     = juce::jlimit (0.0f, 2.0f, getParam ("width"));
+    const float spreadMs  = juce::jlimit (0.0f, 5.0f, getParam ("delay_spread"));
+    const float hfPreserve= juce::jlimit (0.0f, 1.0f, getParam ("hf_preserve"));
+    const float monoSafeVal = juce::jlimit (0.0f, 1.0f, getParam ("mono_safe"));
+    const float outputTrim  = getParam ("output_trim");
+    const bool monoSafe   = monoSafeVal > 0.5f;
+
+    if (monoSafe)
+        width = juce::jlimit (0.0f, 1.0f, width);
+
+    const float trimGain = juce::Decibels::decibelsToGain (outputTrim);
+
+    lastBlockSize = (juce::uint32) juce::jmax (1, numSamples);
+    dryBuffer.setSize (numChannels, numSamples, false, false, true);
     dryBuffer.makeCopyOf (buffer, true);
+    sumDiffBuffer.setSize (2, numSamples, false, false, true);
 
-    if (buffer.getNumChannels() >= 2)
+    if ((int) numChannels >= 2)
     {
-        auto* left  = buffer.getWritePointer (0);
-        auto* right = buffer.getWritePointer (1);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float left  = dryBuffer.getSample (0, i);
+            const float right = dryBuffer.getSample (1, i);
+            const float mid   = 0.5f * (left + right);
+            const float side  = 0.5f * (left - right);
+            sumDiffBuffer.setSample (0, i, mid);
+            sumDiffBuffer.setSample (1, i, side);
+        }
+
+        const float delaySamples = juce::jlimit (0.0f, 0.02f * (float) currentSampleRate,
+                                                 spreadMs * 0.001f * (float) currentSampleRate);
+        if (! juce::approximatelyEqual (delaySpecSampleRate, currentSampleRate)
+            || delaySpecBlockSize != lastBlockSize)
+        {
+            juce::dsp::ProcessSpec spec { currentSampleRate, lastBlockSize, 1 };
+            sideDelay.setMaximumDelayInSamples ((int) std::ceil (currentSampleRate * 0.02));
+            sideDelay.prepare (spec);
+            sideDelay.reset();
+            delaySpecSampleRate = currentSampleRate;
+            delaySpecBlockSize  = lastBlockSize;
+        }
+        sideDelay.setDelay (delaySamples);
 
         for (int i = 0; i < numSamples; ++i)
         {
-            const float mid  = 0.5f * (left[i] + right[i]);
-            const float side = 0.5f * (left[i] - right[i]);
+            const float mid  = sumDiffBuffer.getSample (0, i);
+            float side       = sumDiffBuffer.getSample (1, i) * width;
 
-            const float widenedSide = side * width;
-            left[i]  = mid + widenedSide;
-            right[i] = mid - widenedSide;
+            const float delayedSide = sideDelay.popSample (0);
+            sideDelay.pushSample (0, side);
+            side = delayedSide * (1.0f - hfPreserve) + side * hfPreserve;
+
+            buffer.setSample (0, i, (mid + side) * trimGain);
+            buffer.setSample (1, i, (mid - side) * trimGain);
         }
-
-        applyMicroDelay (buffer, spreadMs);
-
-        const float hfGain = juce::jmap (hfPreserve, 0.0f, 1.0f, 0.8f, 1.0f);
+    }
+    else
+    {
         for (int i = 0; i < numSamples; ++i)
-        {
-            left[i]  = juce::dsp::FastMathApproximations::tanh (left[i] * hfGain);
-            right[i] = juce::dsp::FastMathApproximations::tanh (right[i] * hfGain);
-        }
-
-        for (int i = 0; i < numSamples; ++i)
-        {
-            const float mono = 0.5f * (dryBuffer.getSample (0, i) + dryBuffer.getSample (1, i));
-            left[i]  = juce::jmap (monoSafe, left[i], mono);
-            right[i] = juce::jmap (monoSafe, right[i], mono);
-        }
+            buffer.setSample (0, i, dryBuffer.getSample (0, i) * trimGain);
     }
 }
 
@@ -95,7 +134,9 @@ MDLWideTrackAudioProcessor::createParameterLayout()
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("hf_preserve", "HF Preserve",
                                                                    juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.8f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("mono_safe",   "Mono Safe",
-                                                                   juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.4f));
+                                                                   juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.5f));
+    params.push_back (std::make_unique<juce::AudioParameterFloat> ("output_trim", "Output Trim",
+                                                                   juce::NormalisableRange<float> (-18.0f, 18.0f, 0.01f), 0.0f));
 
     return { params.begin(), params.end() };
 }
@@ -103,16 +144,17 @@ MDLWideTrackAudioProcessor::createParameterLayout()
 MDLWideTrackAudioProcessorEditor::MDLWideTrackAudioProcessorEditor (MDLWideTrackAudioProcessor& p)
     : juce::AudioProcessorEditor (&p), processorRef (p)
 {
-    auto make = [this](juce::Slider& slider, const juce::String& label) { initSlider (slider, label); };
+    auto makeSlider = [this](juce::Slider& slider, const juce::String& label) { initSlider (slider, label); };
 
-    make (widthSlider,      "Width");
-    make (delaySpreadSlider,"Spread");
-    make (hfSlider,         "HF Preserve");
-    make (monoSlider,       "Mono Safe");
+    makeSlider (widthSlider,        "Width");
+    makeSlider (delaySpreadSlider,  "Delay Spread");
+    makeSlider (hfSlider,           "HF Preserve");
+    makeSlider (monoSlider,         "Mono Safe");
+    makeSlider (outputTrimSlider,   "Output Trim");
 
     auto& state = processorRef.getValueTreeState();
-    const juce::StringArray ids { "width", "delay_spread", "hf_preserve", "mono_safe" };
-    juce::Slider* sliders[] = { &widthSlider, &delaySpreadSlider, &hfSlider, &monoSlider };
+    const juce::StringArray ids { "width", "delay_spread", "hf_preserve", "mono_safe", "output_trim" };
+    juce::Slider* sliders[] = { &widthSlider, &delaySpreadSlider, &hfSlider, &monoSlider, &outputTrimSlider };
 
     for (int i = 0; i < ids.size(); ++i)
         attachments.push_back (std::make_unique<SliderAttachment> (state, ids[i], *sliders[i]));
@@ -139,12 +181,13 @@ void MDLWideTrackAudioProcessorEditor::paint (juce::Graphics& g)
 void MDLWideTrackAudioProcessorEditor::resized()
 {
     auto area = getLocalBounds().reduced (10);
-    auto width = area.getWidth() / 4;
+    auto width = area.getWidth() / 5;
 
     widthSlider     .setBounds (area.removeFromLeft (width).reduced (8));
     delaySpreadSlider.setBounds (area.removeFromLeft (width).reduced (8));
     hfSlider        .setBounds (area.removeFromLeft (width).reduced (8));
     monoSlider      .setBounds (area.removeFromLeft (width).reduced (8));
+    outputTrimSlider.setBounds (area.removeFromLeft (width).reduced (8));
 }
 
 juce::AudioProcessorEditor* MDLWideTrackAudioProcessor::createEditor()
@@ -152,27 +195,7 @@ juce::AudioProcessorEditor* MDLWideTrackAudioProcessor::createEditor()
     return new MDLWideTrackAudioProcessorEditor (*this);
 }
 
-void MDLWideTrackAudioProcessor::applyMicroDelay (juce::AudioBuffer<float>& buffer, float spreadMs)
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
-    if (spreadMs <= 0.0f || buffer.getNumChannels() < 2)
-        return;
-
-    const int delaySamples = (int) juce::jlimit (1.0f, (double) currentSampleRate * 0.01,
-                                                 spreadMs * 0.001f * (float) currentSampleRate);
-
-    juce::AudioBuffer<float> temp;
-    temp.makeCopyOf (buffer, true);
-
-    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-    {
-        auto* dest = buffer.getWritePointer (ch);
-        const auto* src = temp.getReadPointer (ch);
-
-        const int offset = (ch == 0 ? -delaySamples : delaySamples);
-        for (int i = 0; i < buffer.getNumSamples(); ++i)
-        {
-            const int idx = juce::jlimit (0, buffer.getNumSamples() - 1, i + offset);
-            dest[i] = src[idx];
-        }
-    }
+    return new MDLWideTrackAudioProcessor();
 }

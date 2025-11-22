@@ -1,8 +1,9 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "../../DualPrecisionAudioProcessor.h"
 
-class GLSMixHeadAudioProcessor : public juce::AudioProcessor
+class GLSMixHeadAudioProcessor : public DualPrecisionAudioProcessor
 {
 public:
     GLSMixHeadAudioProcessor();
@@ -24,7 +25,10 @@ public:
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    const juce::String getProgramName (int index) override
+    {
+        return index == 0 ? juce::String ("GLS Mix Head 01") : juce::String();
+    }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;

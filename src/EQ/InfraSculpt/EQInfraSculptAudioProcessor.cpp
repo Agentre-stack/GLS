@@ -1,7 +1,7 @@
 #include "EQInfraSculptAudioProcessor.h"
 
 EQInfraSculptAudioProcessor::EQInfraSculptAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "INFRA_SCULPT", createParameterLayout())
@@ -49,27 +49,28 @@ void EQInfraSculptAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer
     monoBuffer.setSize (numChannels, numSamples, false, false, true);
     monoBuffer.makeCopyOf (buffer, true);
 
+    juce::dsp::AudioBlock<float> block (buffer);
     for (int ch = 0; ch < numChannels; ++ch)
     {
+        auto channelBlock = block.getSingleChannelBlock ((size_t) ch);
         for (int stage = 0; stage < activeStageCount && stage < (int) hpStacks[ch].stages.size(); ++stage)
         {
-            juce::dsp::AudioBlock<float> block (buffer.getArrayOfWritePointers()[ch], 1, (size_t) numSamples);
-            juce::dsp::ProcessContextReplacing<float> ctx (block);
+            juce::dsp::ProcessContextReplacing<float> ctx (channelBlock);
             hpStacks[ch].stages[stage].process (ctx);
         }
 
-        juce::dsp::AudioBlock<float> resBlock (buffer.getArrayOfWritePointers()[ch], 1, (size_t) numSamples);
-        juce::dsp::ProcessContextReplacing<float> resCtx (resBlock);
+        juce::dsp::ProcessContextReplacing<float> resCtx (channelBlock);
         resonanceFilters[ch].process (resCtx);
     }
 
     // Mono below threshold
     if (numChannels >= 2)
     {
+        juce::dsp::AudioBlock<float> monoBlock (monoBuffer);
         for (int ch = 0; ch < numChannels; ++ch)
         {
-            juce::dsp::AudioBlock<float> monoBlock (monoBuffer.getArrayOfWritePointers()[ch], 1, (size_t) numSamples);
-            juce::dsp::ProcessContextReplacing<float> ctx (monoBlock);
+            auto monoChannel = monoBlock.getSingleChannelBlock ((size_t) ch);
+            juce::dsp::ProcessContextReplacing<float> ctx (monoChannel);
             monoLowFilters[ch].process (ctx);
         }
 
@@ -253,4 +254,9 @@ void EQInfraSculptAudioProcessor::updateFilters (float subHpf, int stageCount, f
         filter.coefficients = resonanceCoeffs;
     for (auto& filter : monoLowFilters)
         filter.coefficients = monoCoeffs;
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new EQInfraSculptAudioProcessor();
 }

@@ -1,7 +1,31 @@
 #include "EQLowBenderAudioProcessor.h"
 
+const std::array<EQLowBenderAudioProcessor::Preset, 3> EQLowBenderAudioProcessor::presetBank {{
+    { "808 Lift", {
+        { "sub_boost",   3.5f },
+        { "low_cut",    30.0f },
+        { "punch_freq", 80.0f },
+        { "punch_gain",  2.0f },
+        { "tightness",   0.65f }
+    }},
+    { "Bass Guitar", {
+        { "sub_boost",   1.5f },
+        { "low_cut",    40.0f },
+        { "punch_freq",120.0f },
+        { "punch_gain",  3.0f },
+        { "tightness",   0.45f }
+    }},
+    { "Kick Tight", {
+        { "sub_boost",   2.5f },
+        { "low_cut",    45.0f },
+        { "punch_freq",100.0f },
+        { "punch_gain",  4.0f },
+        { "tightness",   0.55f }
+    }}
+}};
+
 EQLowBenderAudioProcessor::EQLowBenderAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "LOW_BENDER", createParameterLayout())
@@ -159,6 +183,28 @@ juce::AudioProcessorEditor* EQLowBenderAudioProcessor::createEditor()
     return new EQLowBenderAudioProcessorEditor (*this);
 }
 
+int EQLowBenderAudioProcessor::getNumPrograms()
+{
+    return (int) presetBank.size();
+}
+
+const juce::String EQLowBenderAudioProcessor::getProgramName (int index)
+{
+    if (juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return presetBank[(size_t) index].name;
+    return {};
+}
+
+void EQLowBenderAudioProcessor::setCurrentProgram (int index)
+{
+    const int clamped = juce::jlimit (0, (int) presetBank.size() - 1, index);
+    if (clamped == currentPreset)
+        return;
+
+    currentPreset = clamped;
+    applyPreset (clamped);
+}
+
 void EQLowBenderAudioProcessor::ensureFilterState (int numChannels)
 {
     if (numChannels <= 0)
@@ -217,4 +263,25 @@ void EQLowBenderAudioProcessor::updateFilters (float subBoostDb, float punchFreq
         filter.coefficients = punchCoeffs;
     for (auto& filter : lowCuts)
         filter.coefficients = hpCoeffs;
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new EQLowBenderAudioProcessor();
+}
+
+void EQLowBenderAudioProcessor::applyPreset (int index)
+{
+    if (! juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return;
+
+    const auto& preset = presetBank[(size_t) index];
+    for (const auto& entry : preset.params)
+    {
+        if (auto* param = apvts.getParameter (entry.first))
+        {
+            auto norm = param->getNormalisableRange().convertTo0to1 (entry.second);
+            param->setValueNotifyingHost (norm);
+        }
+    }
 }

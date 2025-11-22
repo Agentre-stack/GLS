@@ -1,7 +1,7 @@
 #include "EQVoxDesignerEQAudioProcessor.h"
 
 EQVoxDesignerEQAudioProcessor::EQVoxDesignerEQAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "VOX_DESIGNER_EQ", createParameterLayout())
@@ -50,21 +50,26 @@ void EQVoxDesignerEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buff
     const float attackCoeff  = std::exp (-1.0f / (0.0025f * (float) currentSampleRate));
     const float releaseCoeff = std::exp (-1.0f / (0.08f * (float) currentSampleRate));
 
+    juce::dsp::AudioBlock<float> block (buffer);
     for (int ch = 0; ch < numChannels; ++ch)
     {
         auto* data = buffer.getWritePointer (ch);
         auto* dry  = dryBuffer.getReadPointer (ch);
         auto& sibilanceEnv = sibilanceEnvelopes[ch];
 
-        juce::dsp::AudioBlock<float> block (buffer.getArrayOfWritePointers()[ch], 1, (size_t) numSamples);
-        juce::dsp::ProcessContextReplacing<float> chestCtx (block);
-        chestShelves[ch].process (chestCtx);
-
-        juce::dsp::ProcessContextReplacing<float> presenceCtx (block);
-        presenceBells[ch].process (presenceCtx);
-
-        juce::dsp::ProcessContextReplacing<float> airCtx (block);
-        airShelves[ch].process (airCtx);
+        auto channelBlock = block.getSingleChannelBlock ((size_t) ch);
+        {
+            juce::dsp::ProcessContextReplacing<float> chestCtx (channelBlock);
+            chestShelves[ch].process (chestCtx);
+        }
+        {
+            juce::dsp::ProcessContextReplacing<float> presenceCtx (channelBlock);
+            presenceBells[ch].process (presenceCtx);
+        }
+        {
+            juce::dsp::ProcessContextReplacing<float> airCtx (channelBlock);
+            airShelves[ch].process (airCtx);
+        }
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -247,4 +252,9 @@ void EQVoxDesignerEQAudioProcessor::updateFilters (float chestGain, float presen
         f.coefficients = airCoeffs;
     for (auto& f : exciterHighpasses)
         f.coefficients = exciterCoeffs;
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new EQVoxDesignerEQAudioProcessor();
 }

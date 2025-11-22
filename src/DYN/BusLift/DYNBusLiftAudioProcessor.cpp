@@ -1,10 +1,54 @@
 #include "DYNBusLiftAudioProcessor.h"
 
+namespace
+{
+constexpr auto kStateId = "BUS_LIFT";
+}
+
+const std::array<DYNBusLiftAudioProcessor::Preset, 3> DYNBusLiftAudioProcessor::presetBank {{
+    { "Drum Bus", {
+        { "low_thresh",  -18.0f },
+        { "mid_thresh",  -14.0f },
+        { "high_thresh", -10.0f },
+        { "ratio",         3.0f },
+        { "attack",        8.0f },
+        { "release",     150.0f },
+        { "mix",           0.85f },
+        { "input_trim",    0.0f },
+        { "output_trim",   0.0f },
+        { "ui_bypass",     0.0f }
+    }},
+    { "Mix Glue", {
+        { "low_thresh",  -16.0f },
+        { "mid_thresh",  -12.0f },
+        { "high_thresh",  -8.0f },
+        { "ratio",         2.2f },
+        { "attack",       12.0f },
+        { "release",     220.0f },
+        { "mix",           0.7f },
+        { "input_trim",    0.0f },
+        { "output_trim",   0.5f },
+        { "ui_bypass",     0.0f }
+    }},
+    { "Vocal Lift", {
+        { "low_thresh",  -22.0f },
+        { "mid_thresh",  -18.0f },
+        { "high_thresh", -15.0f },
+        { "ratio",         2.8f },
+        { "attack",        6.0f },
+        { "release",     130.0f },
+        { "mix",           0.9f },
+        { "input_trim",   -1.0f },
+        { "output_trim",   0.0f },
+        { "ui_bypass",     0.0f }
+    }}
+}};
+
 DYNBusLiftAudioProcessor::DYNBusLiftAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
-      apvts (*this, nullptr, "BUS_LIFT", createParameterLayout())
+      apvts (*this, nullptr, kStateId, createParameterLayout())
 {
 }
 
@@ -44,6 +88,8 @@ void DYNBusLiftAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     auto read = [this](const char* id) { return apvts.getRawParameterValue (id)->load(); };
 
+    const bool bypassed   = apvts.getRawParameterValue ("ui_bypass")->load() > 0.5f;
+    const auto inputTrim  = juce::Decibels::decibelsToGain (read ("input_trim"));
     const auto lowThresh  = read ("low_thresh");
     const auto midThresh  = read ("mid_thresh");
     const auto highThresh = read ("high_thresh");
@@ -51,7 +97,12 @@ void DYNBusLiftAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const auto attack     = read ("attack");
     const auto release    = read ("release");
     const auto mix        = juce::jlimit (0.0f, 1.0f, read ("mix"));
+    const auto outputTrim = juce::Decibels::decibelsToGain (read ("output_trim"));
 
+    if (bypassed)
+        return;
+
+    buffer.applyGain (inputTrim);
     dryBuffer.makeCopyOf (buffer, true);
     const int numChannels = buffer.getNumChannels();
     const int numSamples = buffer.getNumSamples();
@@ -91,13 +142,18 @@ void DYNBusLiftAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             out[i] = processed * mix + dry[i] * (1.0f - mix);
         }
     }
+
+    if (outputTrim != 1.0f)
+        buffer.applyGain (outputTrim);
 }
 
 void DYNBusLiftAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    auto state = apvts.copyState();
+    if (auto state = apvts.copyState(); state.isValid())
+    {
         juce::MemoryOutputStream stream (destData, false);
         state.writeToStream (stream);
+    }
 }
 
 void DYNBusLiftAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
@@ -115,6 +171,8 @@ DYNBusLiftAudioProcessor::createParameterLayout()
     auto timeRange   = juce::NormalisableRange<float> (1.0f, 100.0f, 0.01f, 0.35f);
     auto releaseRange= juce::NormalisableRange<float> (10.0f, 600.0f, 0.01f, 0.35f);
 
+    params.push_back (std::make_unique<juce::AudioParameterFloat> ("input_trim", "Input Trim",
+                                                                   juce::NormalisableRange<float> (-18.0f, 18.0f, 0.1f), 0.0f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("low_thresh",  "Low Thresh",  threshRange, -24.0f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("mid_thresh",  "Mid Thresh",  threshRange, -18.0f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("high_thresh", "High Thresh", threshRange, -12.0f));
@@ -124,64 +182,131 @@ DYNBusLiftAudioProcessor::createParameterLayout()
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("release",     "Release", releaseRange, 150.0f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("mix",         "Mix",
                                                                    juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 1.0f));
+    params.push_back (std::make_unique<juce::AudioParameterFloat> ("output_trim", "Output Trim",
+                                                                   juce::NormalisableRange<float> (-18.0f, 18.0f, 0.1f), 0.0f));
+    params.push_back (std::make_unique<juce::AudioParameterBool> ("ui_bypass", "Soft Bypass", false));
 
     return { params.begin(), params.end() };
 }
 
 DYNBusLiftAudioProcessorEditor::DYNBusLiftAudioProcessorEditor (DYNBusLiftAudioProcessor& p)
-    : juce::AudioProcessorEditor (&p), processorRef (p)
+    : juce::AudioProcessorEditor (&p), processorRef (p),
+      accentColour (gls::ui::accentForFamily ("DYN")),
+      headerComponent ("DYN.BusLift", "Bus Lift")
 {
-    auto init = [this](juce::Slider& slider, const juce::String& label) { initSlider (slider, label); };
+    lookAndFeel.setAccentColour (accentColour);
+    setLookAndFeel (&lookAndFeel);
+    headerComponent.setAccentColour (accentColour);
+    footerComponent.setAccentColour (accentColour);
 
-    init (lowThreshSlider,  "Low Thresh");
-    init (midThreshSlider,  "Mid Thresh");
-    init (highThreshSlider, "High Thresh");
-    init (ratioSlider,      "Ratio");
+    addAndMakeVisible (headerComponent);
+    addAndMakeVisible (footerComponent);
+
+    auto init = [this](juce::Slider& slider, const juce::String& label, bool macro = false) { initSlider (slider, label, macro); };
+
+    init (lowThreshSlider,  "Low Thresh", true);
+    init (midThreshSlider,  "Mid Thresh", true);
+    init (highThreshSlider, "High Thresh", true);
+    init (ratioSlider,      "Ratio", true);
     init (attackSlider,     "Attack");
     init (releaseSlider,    "Release");
     init (mixSlider,        "Mix");
+    init (inputTrimSlider,  "Input");
+    init (outputTrimSlider, "Output");
+    initToggle (bypassButton);
 
     auto& state = processorRef.getValueTreeState();
-    const juce::StringArray ids { "low_thresh", "mid_thresh", "high_thresh", "ratio", "attack", "release", "mix" };
+    const juce::StringArray ids { "low_thresh", "mid_thresh", "high_thresh", "ratio", "attack", "release", "mix", "input_trim", "output_trim" };
     juce::Slider* sliders[] = { &lowThreshSlider, &midThreshSlider, &highThreshSlider,
-                                &ratioSlider, &attackSlider, &releaseSlider, &mixSlider };
+                                &ratioSlider, &attackSlider, &releaseSlider, &mixSlider, &inputTrimSlider, &outputTrimSlider };
 
     for (int i = 0; i < ids.size(); ++i)
         attachments.push_back (std::make_unique<SliderAttachment> (state, ids[i], *sliders[i]));
 
-    setSize (780, 300);
+    buttonAttachments.push_back (std::make_unique<ButtonAttachment> (state, "ui_bypass", bypassButton));
+
+    setSize (880, 420);
 }
 
-void DYNBusLiftAudioProcessorEditor::initSlider (juce::Slider& slider, const juce::String& name)
+void DYNBusLiftAudioProcessorEditor::initSlider (juce::Slider& slider, const juce::String& name, bool isMacro)
 {
+    slider.setLookAndFeel (&lookAndFeel);
     slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 70, 18);
+    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, isMacro ? 72 : 64, 18);
     slider.setName (name);
     addAndMakeVisible (slider);
+
+    auto label = std::make_unique<juce::Label>();
+    label->setText (name, juce::dontSendNotification);
+    label->setJustificationType (juce::Justification::centred);
+    label->setColour (juce::Label::textColourId, gls::ui::Colours::text());
+    label->setFont (gls::ui::makeFont (12.0f));
+    addAndMakeVisible (*label);
+    sliderLabels.push_back (std::move (label));
+}
+
+void DYNBusLiftAudioProcessorEditor::initToggle (juce::ToggleButton& toggle)
+{
+    toggle.setLookAndFeel (&lookAndFeel);
+    toggle.setClickingTogglesState (true);
+    addAndMakeVisible (toggle);
+}
+
+void DYNBusLiftAudioProcessorEditor::layoutLabels()
+{
+    const std::array<juce::Slider*, 9> sliders { &lowThreshSlider, &midThreshSlider, &highThreshSlider,
+                                                 &ratioSlider, &attackSlider, &releaseSlider, &mixSlider,
+                                                 &inputTrimSlider, &outputTrimSlider };
+    for (size_t i = 0; i < sliders.size() && i < sliderLabels.size(); ++i)
+    {
+        auto* slider = sliders[i];
+        auto* label = sliderLabels[i].get();
+        if (slider != nullptr && label != nullptr)
+        {
+            auto bounds = slider->getBounds().withHeight (18).translated (0, -20);
+            label->setBounds (bounds);
+        }
+    }
 }
 
 void DYNBusLiftAudioProcessorEditor::paint (juce::Graphics& g)
 {
-    g.fillAll (juce::Colours::black);
-    g.setColour (juce::Colours::white);
-    g.setFont (16.0f);
-    g.drawFittedText ("DYN Bus Lift", getLocalBounds().removeFromTop (24), juce::Justification::centred, 1);
+    g.fillAll (gls::ui::Colours::background());
+    auto body = getLocalBounds().withTrimmedTop (64).withTrimmedBottom (64);
+    g.setColour (gls::ui::Colours::panel().darker (0.25f));
+    g.fillRoundedRectangle (body.toFloat().reduced (8.0f), 10.0f);
 }
 
 void DYNBusLiftAudioProcessorEditor::resized()
 {
-    auto area = getLocalBounds().reduced (10);
-    auto row = area.removeFromTop (area.getHeight() / 2);
+    auto bounds = getLocalBounds();
+    headerComponent.setBounds (bounds.removeFromTop (64));
+    footerComponent.setBounds (bounds.removeFromBottom (64));
 
-    auto layoutRow = [](juce::Rectangle<int> bounds, std::initializer_list<juce::Component*> comps)
-    {
-        auto width = bounds.getWidth() / static_cast<int> (comps.size());
-        for (auto* comp : comps)
-            comp->setBounds (bounds.removeFromLeft (width).reduced (8));
-    };
+    auto body = bounds.reduced (12);
+    auto left = body.removeFromLeft (juce::roundToInt (body.getWidth() * 0.55f)).reduced (10);
+    auto right = body.reduced (10);
 
-    layoutRow (row, { &lowThreshSlider, &midThreshSlider, &highThreshSlider, &ratioSlider });
-    layoutRow (area, { &attackSlider, &releaseSlider, &mixSlider });
+    auto macroHeight = left.getHeight() / 2;
+    auto macroRow = left.removeFromTop (macroHeight);
+    auto macroWidth = macroRow.getWidth() / 4;
+    lowThreshSlider .setBounds (macroRow.removeFromLeft (macroWidth).reduced (6));
+    midThreshSlider .setBounds (macroRow.removeFromLeft (macroWidth).reduced (6));
+    highThreshSlider.setBounds (macroRow.removeFromLeft (macroWidth).reduced (6));
+    ratioSlider     .setBounds (macroRow.removeFromLeft (macroWidth).reduced (6));
+
+    auto microRow = left;
+    auto microWidth = microRow.getWidth() / 3;
+    attackSlider .setBounds (microRow.removeFromLeft (microWidth).reduced (6));
+    releaseSlider.setBounds (microRow.removeFromLeft (microWidth).reduced (6));
+    mixSlider    .setBounds (microRow.removeFromLeft (microWidth).reduced (6));
+
+    auto rightHeight = right.getHeight() / 2;
+    inputTrimSlider .setBounds (right.removeFromTop (rightHeight).reduced (8));
+    outputTrimSlider.setBounds (right.removeFromTop (rightHeight).reduced (8));
+    bypassButton    .setBounds (right.removeFromTop (32).reduced (4));
+
+    layoutLabels();
 }
 
 juce::AudioProcessorEditor* DYNBusLiftAudioProcessor::createEditor()
@@ -220,4 +345,47 @@ void DYNBusLiftAudioProcessor::processBand (juce::AudioBuffer<float>& bandBuffer
             data[i] *= gain;
         }
     }
+}
+
+int DYNBusLiftAudioProcessor::getNumPrograms()
+{
+    return (int) presetBank.size();
+}
+
+const juce::String DYNBusLiftAudioProcessor::getProgramName (int index)
+{
+    if (juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return presetBank[(size_t) index].name;
+    return {};
+}
+
+void DYNBusLiftAudioProcessor::setCurrentProgram (int index)
+{
+    const int clamped = juce::jlimit (0, (int) presetBank.size() - 1, index);
+    if (clamped == currentPreset)
+        return;
+
+    currentPreset = clamped;
+    applyPreset (clamped);
+}
+
+void DYNBusLiftAudioProcessor::applyPreset (int index)
+{
+    if (! juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return;
+
+    const auto& preset = presetBank[(size_t) index];
+    for (const auto& entry : preset.params)
+    {
+        if (auto* param = apvts.getParameter (entry.first))
+        {
+            auto norm = param->getNormalisableRange().convertTo0to1 (entry.second);
+            param->setValueNotifyingHost (norm);
+        }
+    }
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new DYNBusLiftAudioProcessor();
 }

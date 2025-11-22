@@ -12,20 +12,27 @@ constexpr auto paramMix       = "mix";
 }
 
 PITShiftPrimeAudioProcessor::PITShiftPrimeAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor (BusesProperties()
                         .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "PIT_SHIFT_PRIME", createParameterLayout())
 {
 }
 
-void PITShiftPrimeAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerBlock*/)
+void PITShiftPrimeAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = juce::jmax (sampleRate, 44100.0);
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    const auto totalChannels = juce::jmax (2, getTotalNumOutputChannels());
+    const auto blockSize = juce::jmax (1, samplesPerBlock);
+
     hpfFilters.clear();
     lpfFilters.clear();
     formantFilters.clear();
-    dryBuffer.setSize (getTotalNumOutputChannels(), 0);
+    dryBuffer.setSize (totalChannels, blockSize);
+    wetBuffer.setSize (totalChannels, blockSize);
+
+    pitchShifter.prepare (currentSampleRate, totalChannels);
+    pitchShifter.reset();
 }
 
 void PITShiftPrimeAudioProcessor::releaseResources()
@@ -44,6 +51,7 @@ void PITShiftPrimeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer
 
     ensureStateSize (buffer.getNumChannels(), buffer.getNumSamples());
     dryBuffer.makeCopyOf (buffer, true);
+    wetBuffer.makeCopyOf (buffer, true);
 
     const auto semitones = apvts.getRawParameterValue (paramSemitones)->load();
     const auto cents     = apvts.getRawParameterValue (paramCents)->load();
@@ -56,19 +64,18 @@ void PITShiftPrimeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer
     updateFilters (hpfFreq, lpfFreq, formant);
 
     const float ratio = std::pow (2.0f, (semitones + cents / 100.0f) / 12.0f);
-    const float drive = mode == 1 ? juce::jmap (std::abs (semitones), 0.0f, 12.0f, 1.0f, 2.0f) : 1.0f;
+    const float drive = mode == 1 ? juce::jmap (std::abs (semitones), 0.0f, 12.0f, 1.0f, 2.5f) : 1.0f;
 
-    // TODO: Integrate actual pitch shifting using `ratio` once DSP block is ready.
-    juce::ignoreUnused (ratio);
+    pitchShifter.process (wetBuffer, ratio);
 
-    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+    for (int ch = 0; ch < wetBuffer.getNumChannels(); ++ch)
     {
-        auto* data = buffer.getWritePointer (ch);
+        auto* data = wetBuffer.getWritePointer (ch);
         auto& hpf  = hpfFilters[(size_t) ch];
         auto& lpf  = lpfFilters[(size_t) ch];
         auto& form = formantFilters[(size_t) ch];
 
-        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        for (int i = 0; i < wetBuffer.getNumSamples(); ++i)
         {
             float sample = data[i];
             sample = hpf.processSample (sample);
@@ -78,8 +85,17 @@ void PITShiftPrimeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer
             if (mode == 1)
                 sample = juce::dsp::FastMathApproximations::tanh (sample * drive);
 
-            data[i] = sample * mix + dryBuffer.getSample (ch, i) * (1.0f - mix);
+            data[i] = sample;
         }
+    }
+
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+    {
+        auto* dry = dryBuffer.getReadPointer (ch);
+        auto* wet = wetBuffer.getReadPointer (ch);
+        auto* out = buffer.getWritePointer (ch);
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+            out[i] = wet[i] * mix + dry[i] * (1.0f - mix);
     }
 }
 
@@ -87,6 +103,9 @@ void PITShiftPrimeAudioProcessor::ensureStateSize (int numChannels, int numSampl
 {
     if (dryBuffer.getNumChannels() != numChannels || dryBuffer.getNumSamples() != numSamples)
         dryBuffer.setSize (numChannels, numSamples, false, false, true);
+
+    if (wetBuffer.getNumChannels() != numChannels || wetBuffer.getNumSamples() != numSamples)
+        wetBuffer.setSize (numChannels, numSamples, false, false, true);
 
     auto ensureFilter = [numChannels](auto& filters)
     {

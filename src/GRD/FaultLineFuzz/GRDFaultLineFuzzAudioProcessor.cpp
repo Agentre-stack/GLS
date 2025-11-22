@@ -8,13 +8,45 @@ constexpr auto paramBias      = "bias";
 constexpr auto paramGate      = "gate";
 constexpr auto paramTone      = "tone";
 constexpr auto paramOutput    = "output_trim";
+constexpr auto paramBypass    = "ui_bypass";
+constexpr auto kStateId       = "FAULT_LINE_FUZZ";
 }
 
+const std::array<GRDFaultLineFuzzAudioProcessor::Preset, 3> GRDFaultLineFuzzAudioProcessor::presetBank {{
+    { "Vocal Edge", {
+        { paramInputTrim,   0.0f },
+        { paramFuzz,        0.55f },
+        { paramBias,        0.1f },
+        { paramGate,        0.4f },
+        { paramTone,     5200.0f },
+        { paramOutput,     -1.0f },
+        { paramBypass,      0.0f }
+    }},
+    { "Gritty Bass", {
+        { paramInputTrim,   1.5f },
+        { paramFuzz,        0.7f },
+        { paramBias,       -0.15f },
+        { paramGate,        0.2f },
+        { paramTone,     3000.0f },
+        { paramOutput,     -1.5f },
+        { paramBypass,      0.0f }
+    }},
+    { "Alt Drum Crush", {
+        { paramInputTrim,   0.5f },
+        { paramFuzz,        0.65f },
+        { paramBias,        0.0f },
+        { paramGate,        0.5f },
+        { paramTone,     6500.0f },
+        { paramOutput,     -0.8f },
+        { paramBypass,      0.0f }
+    }}
+}};
+
 GRDFaultLineFuzzAudioProcessor::GRDFaultLineFuzzAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor (BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
-      apvts (*this, nullptr, "FAULT_LINE_FUZZ", createParameterLayout())
+      apvts (*this, nullptr, kStateId, createParameterLayout())
 {
 }
 
@@ -43,12 +75,13 @@ void GRDFaultLineFuzzAudioProcessor::processBlock (juce::AudioBuffer<float>& buf
     ensureStateSize (buffer.getNumChannels(), buffer.getNumSamples());
     processingBuffer.makeCopyOf (buffer, true);
 
-    const auto inputDb  = apvts.getRawParameterValue (paramInputTrim)->load();
-    const auto fuzz     = juce::jlimit (0.0f, 1.0f, apvts.getRawParameterValue (paramFuzz)->load());
-    const auto bias     = juce::jlimit (-1.0f, 1.0f, apvts.getRawParameterValue (paramBias)->load());
-    const auto gate     = juce::jlimit (0.0f, 1.0f, apvts.getRawParameterValue (paramGate)->load());
-    const auto toneHz   = apvts.getRawParameterValue (paramTone)->load();
-    const auto outputDb = apvts.getRawParameterValue (paramOutput)->load();
+    const auto inputDb   = apvts.getRawParameterValue (paramInputTrim)->load();
+    const auto fuzz      = juce::jlimit (0.0f, 1.0f, apvts.getRawParameterValue (paramFuzz)->load());
+    const auto bias      = juce::jlimit (-1.0f, 1.0f, apvts.getRawParameterValue (paramBias)->load());
+    const auto gate      = juce::jlimit (0.0f, 1.0f, apvts.getRawParameterValue (paramGate)->load());
+    const auto toneHz    = apvts.getRawParameterValue (paramTone)->load();
+    const auto outputDb  = apvts.getRawParameterValue (paramOutput)->load();
+    const bool bypassed  = apvts.getRawParameterValue (paramBypass)->load() > 0.5f;
 
     const auto inGain  = juce::Decibels::decibelsToGain (inputDb);
     const auto outGain = juce::Decibels::decibelsToGain (outputDb);
@@ -62,6 +95,12 @@ void GRDFaultLineFuzzAudioProcessor::processBlock (juce::AudioBuffer<float>& buf
         filter.coefficients = toneCoeffs;
 
     const float fuzzDrive = juce::jmap (fuzz, 2.0f, 40.0f);
+
+    if (bypassed)
+    {
+        buffer.applyGain (outGain);
+        return;
+    }
 
     for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
     {
@@ -128,6 +167,8 @@ GRDFaultLineFuzzAudioProcessor::createParameterLayout()
     params.push_back (std::make_unique<juce::AudioParameterFloat> (
         paramOutput, "Output Trim",
         juce::NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f));
+    params.push_back (std::make_unique<juce::AudioParameterBool> (
+        paramBypass, "Soft Bypass", false));
 
     return { params.begin(), params.end() };
 }
@@ -156,14 +197,25 @@ juce::AudioProcessorEditor* GRDFaultLineFuzzAudioProcessor::createEditor()
 
 //==============================================================================
 GRDFaultLineFuzzAudioProcessorEditor::GRDFaultLineFuzzAudioProcessorEditor (GRDFaultLineFuzzAudioProcessor& p)
-    : juce::AudioProcessorEditor (&p), processorRef (p)
+    : juce::AudioProcessorEditor (&p), processorRef (p),
+      accentColour (gls::ui::accentForFamily ("GRD")),
+      headerComponent ("GRD.FaultLineFuzz", "Fault Line Fuzz")
 {
+    lookAndFeel.setAccentColour (accentColour);
+    setLookAndFeel (&lookAndFeel);
+    headerComponent.setAccentColour (accentColour);
+    footerComponent.setAccentColour (accentColour);
+
+    addAndMakeVisible (headerComponent);
+    addAndMakeVisible (footerComponent);
+
     initSlider (inputTrimSlider, "Input");
-    initSlider (fuzzSlider,      "Fuzz");
+    initSlider (fuzzSlider,      "Fuzz", true);
     initSlider (biasSlider,      "Bias");
     initSlider (gateSlider,      "Gate");
     initSlider (toneSlider,      "Tone");
     initSlider (outputTrimSlider,"Output");
+    initToggle (bypassButton);
 
     auto& state = processorRef.getValueTreeState();
     attachments.push_back (std::make_unique<SliderAttachment> (state, paramInputTrim, inputTrimSlider));
@@ -172,37 +224,120 @@ GRDFaultLineFuzzAudioProcessorEditor::GRDFaultLineFuzzAudioProcessorEditor (GRDF
     attachments.push_back (std::make_unique<SliderAttachment> (state, paramGate, gateSlider));
     attachments.push_back (std::make_unique<SliderAttachment> (state, paramTone, toneSlider));
     attachments.push_back (std::make_unique<SliderAttachment> (state, paramOutput, outputTrimSlider));
+    bypassAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (state, paramBypass, bypassButton);
 
-    setSize (640, 260);
+    setSize (740, 420);
 }
 
 void GRDFaultLineFuzzAudioProcessorEditor::paint (juce::Graphics& g)
 {
-    g.fillAll (juce::Colours::black);
-    g.setColour (juce::Colours::white);
-    g.setFont (18.0f);
-    g.drawFittedText ("GRD Fault Line Fuzz", getLocalBounds().removeFromTop (28),
-                      juce::Justification::centred, 1);
+    g.fillAll (gls::ui::Colours::background());
+    auto body = getLocalBounds().withTrimmedTop (64).withTrimmedBottom (64);
+    g.setColour (gls::ui::Colours::panel().darker (0.2f));
+    g.fillRoundedRectangle (body.toFloat().reduced (8.0f), 10.0f);
 }
 
 void GRDFaultLineFuzzAudioProcessorEditor::resized()
 {
-    auto area = getLocalBounds().reduced (10);
-    area.removeFromTop (30);
-    auto row = area.removeFromTop (area.getHeight());
-    auto width = row.getWidth() / 6;
-    inputTrimSlider .setBounds (row.removeFromLeft (width).reduced (6));
-    fuzzSlider      .setBounds (row.removeFromLeft (width).reduced (6));
-    biasSlider      .setBounds (row.removeFromLeft (width).reduced (6));
-    gateSlider      .setBounds (row.removeFromLeft (width).reduced (6));
-    toneSlider      .setBounds (row.removeFromLeft (width).reduced (6));
-    outputTrimSlider.setBounds (row.removeFromLeft (width).reduced (6));
+    auto bounds = getLocalBounds();
+    headerComponent.setBounds (bounds.removeFromTop (64));
+    footerComponent.setBounds (bounds.removeFromBottom (64));
+
+    auto area = bounds.reduced (12);
+    auto top = area.removeFromTop (juce::roundToInt (area.getHeight() * 0.6f));
+    auto bottom = area;
+
+    auto topWidth = top.getWidth() / 4;
+    inputTrimSlider .setBounds (top.removeFromLeft (topWidth).reduced (8));
+    fuzzSlider      .setBounds (top.removeFromLeft (topWidth).reduced (8));
+    biasSlider      .setBounds (top.removeFromLeft (topWidth).reduced (8));
+    gateSlider      .setBounds (top.removeFromLeft (topWidth).reduced (8));
+
+    auto bottomWidth = bottom.getWidth() / 3;
+    toneSlider      .setBounds (bottom.removeFromLeft (bottomWidth).reduced (8));
+    outputTrimSlider.setBounds (bottom.removeFromLeft (bottomWidth).reduced (8));
+
+    bypassButton.setBounds (footerComponent.getBounds().reduced (24, 12));
+    layoutLabels();
 }
 
-void GRDFaultLineFuzzAudioProcessorEditor::initSlider (juce::Slider& slider, const juce::String& name)
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
+    return new GRDFaultLineFuzzAudioProcessor();
+}
+
+void GRDFaultLineFuzzAudioProcessorEditor::initSlider (juce::Slider& slider, const juce::String& name, bool macro)
+{
+    slider.setLookAndFeel (&lookAndFeel);
     slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 70, 18);
+    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, macro ? 72 : 64, 18);
     slider.setName (name);
     addAndMakeVisible (slider);
+
+    auto lab = std::make_unique<juce::Label>();
+    lab->setText (name, juce::dontSendNotification);
+    lab->setJustificationType (juce::Justification::centred);
+    lab->setColour (juce::Label::textColourId, gls::ui::Colours::text());
+    lab->setFont (gls::ui::makeFont (12.0f));
+    addAndMakeVisible (*lab);
+    labels.push_back (std::move (lab));
+}
+
+void GRDFaultLineFuzzAudioProcessorEditor::initToggle (juce::ToggleButton& toggle)
+{
+    toggle.setLookAndFeel (&lookAndFeel);
+    toggle.setClickingTogglesState (true);
+    addAndMakeVisible (toggle);
+}
+
+void GRDFaultLineFuzzAudioProcessorEditor::layoutLabels()
+{
+    std::vector<juce::Slider*> sliders {
+        &inputTrimSlider, &fuzzSlider, &biasSlider, &gateSlider,
+        &toneSlider, &outputTrimSlider
+    };
+
+    for (size_t i = 0; i < sliders.size() && i < labels.size(); ++i)
+    {
+        if (auto* s = sliders[i])
+            labels[i]->setBounds (s->getBounds().withHeight (18).translated (0, -20));
+    }
+}
+
+int GRDFaultLineFuzzAudioProcessor::getNumPrograms()
+{
+    return (int) presetBank.size();
+}
+
+const juce::String GRDFaultLineFuzzAudioProcessor::getProgramName (int index)
+{
+    if (juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return presetBank[(size_t) index].name;
+    return {};
+}
+
+void GRDFaultLineFuzzAudioProcessor::setCurrentProgram (int index)
+{
+    const int clamped = juce::jlimit (0, (int) presetBank.size() - 1, index);
+    if (clamped == currentPreset)
+        return;
+
+    currentPreset = clamped;
+    applyPreset (clamped);
+}
+
+void GRDFaultLineFuzzAudioProcessor::applyPreset (int index)
+{
+    if (! juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return;
+
+    const auto& preset = presetBank[(size_t) index];
+    for (const auto& entry : preset.params)
+    {
+        if (auto* param = apvts.getParameter (entry.first))
+        {
+            const auto norm = param->getNormalisableRange().convertTo0to1 (entry.second);
+            param->setValueNotifyingHost (norm);
+        }
+    }
 }

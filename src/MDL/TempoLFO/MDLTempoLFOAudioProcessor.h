@@ -1,8 +1,9 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "../../DualPrecisionAudioProcessor.h"
 
-class MDLTempoLFOAudioProcessor : public juce::AudioProcessor
+class MDLTempoLFOAudioProcessor : public DualPrecisionAudioProcessor
 {
 public:
     MDLTempoLFOAudioProcessor();
@@ -24,7 +25,7 @@ public:
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    const juce::String getProgramName (int index) override { return index == 0 ? juce::String (JucePlugin_Name " 01") : juce::String(); }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -37,11 +38,13 @@ private:
     juce::AudioProcessorValueTreeState apvts;
 
     float lfoPhase = 0.0f;
+    float smoothedValue = 0.0f;
     double currentSampleRate = 44100.0;
     double bpm = 120.0;
 
     float getSyncRate() const;
     float getWaveValue (float phase, int shape) const;
+    void refreshTempoFromHost();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MDLTempoLFOAudioProcessor)
 };

@@ -1,8 +1,11 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <array>
+#include "../../DualPrecisionAudioProcessor.h"
+#include "../../ui/GoodluckLookAndFeel.h"
 
-class AEVAmbienceEvolverSuiteAudioProcessor : public juce::AudioProcessor
+class AEVAmbienceEvolverSuiteAudioProcessor : public DualPrecisionAudioProcessor
 {
 public:
     AEVAmbienceEvolverSuiteAudioProcessor();
@@ -24,7 +27,7 @@ public:
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    const juce::String getProgramName (int index) override { return index == 0 ? juce::String (JucePlugin_Name " 01") : juce::String(); }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -34,6 +37,11 @@ public:
 
     juce::AudioProcessorValueTreeState& getValueTreeState() { return apvts; }
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+
+    float getLastRmsDb() const noexcept        { return lastRmsDb.load(); }
+    float getProfileProgress() const noexcept  { return profileProgress.load(); }
+    float getCapturedNoiseLevel() const noexcept { return capturedNoiseValue.load(); }
+    bool  isProfileCaptureActive() const noexcept { return profileCaptureArmed; }
 
 private:
     juce::AudioProcessorValueTreeState apvts;
@@ -48,25 +56,32 @@ private:
     std::vector<ChannelState> channelStates;
     double currentSampleRate = 44100.0;
     juce::uint32 lastBlockSize = 512;
+    juce::AudioBuffer<float> dryBuffer;
 
     bool profileCaptureArmed = false;
     int profileSamplesRemaining = 0;
-    float capturedNoise = 0.0f;
-    float profileAccumulator = 0.0f;
+    std::vector<float> profileAccumulators;
     int profileTotalSamples = 1;
+    std::array<std::vector<float>, 3> capturedProfiles {};
+    std::atomic<float> capturedNoiseValue { 1.0e-6f };
+    std::atomic<float> lastRmsDb { -120.0f };
+    std::atomic<float> profileProgress { 0.0f };
 
     void ensureStateSize (int numChannels);
-    void updateProfileState (float sampleEnv);
+    void updateProfileState (float sampleEnv, int channel);
+    void refreshCapturedNoiseSnapshot();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AEVAmbienceEvolverSuiteAudioProcessor)
 };
+
+class AmbienceVisualComponent;
 
 class AEVAmbienceEvolverSuiteAudioProcessorEditor : public juce::AudioProcessorEditor,
                                                     private juce::Button::Listener
 {
 public:
     explicit AEVAmbienceEvolverSuiteAudioProcessorEditor (AEVAmbienceEvolverSuiteAudioProcessor&);
-    ~AEVAmbienceEvolverSuiteAudioProcessorEditor() override = default;
+    ~AEVAmbienceEvolverSuiteAudioProcessorEditor() override;
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -74,20 +89,45 @@ public:
 private:
     AEVAmbienceEvolverSuiteAudioProcessor& processorRef;
 
-    juce::TextButton profileButton { "Capture Profile" };
+    juce::Colour accentColour;
+    gls::ui::GoodluckLookAndFeel lookAndFeel;
+    gls::ui::GoodluckHeader headerComponent;
+    gls::ui::GoodluckFooter footerComponent;
+    std::unique_ptr<AmbienceVisualComponent> centerVisual;
+
     juce::Slider ambienceSlider;
     juce::Slider deVerbSlider;
     juce::Slider noiseSlider;
     juce::Slider transientSlider;
     juce::Slider toneMatchSlider;
     juce::Slider hfRecoverSlider;
-    juce::Slider outputSlider;
+    juce::Slider mixSlider;
+    juce::Slider inputTrimSlider;
+    juce::Slider outputTrimSlider;
+    juce::ToggleButton bypassButton { "Soft Bypass" };
+    juce::TextButton profileButton { "Capture Profile" };
+    juce::ComboBox profileSlotBox;
 
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
-    std::vector<std::unique_ptr<SliderAttachment>> attachments;
+    using ButtonAttachment = juce::AudioProcessorValueTreeState::ButtonAttachment;
+    using ComboAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
+    std::vector<std::unique_ptr<SliderAttachment>> sliderAttachments;
+    std::vector<std::unique_ptr<ButtonAttachment>> buttonAttachments;
+    std::unique_ptr<ComboAttachment> profileSlotAttachment;
 
-    void initSlider (juce::Slider& slider, const juce::String& label);
+    struct LabeledSliderRef
+    {
+        juce::Slider* slider = nullptr;
+        juce::Label* label = nullptr;
+    };
+
+    std::vector<std::unique_ptr<juce::Label>> sliderLabels;
+    std::vector<LabeledSliderRef> labeledSliders;
+
+    void configureSlider (juce::Slider& slider, const juce::String& label, bool isMacro, bool isLinear = false);
+    void configureToggle (juce::ToggleButton& toggle);
     void buttonClicked (juce::Button* button) override;
+    void layoutLabels();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AEVAmbienceEvolverSuiteAudioProcessorEditor)
 };

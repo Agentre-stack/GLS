@@ -1,8 +1,9 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "../../DualPrecisionAudioProcessor.h"
 
-class MDLChopperTremAudioProcessor : public juce::AudioProcessor
+class MDLChopperTremAudioProcessor : public DualPrecisionAudioProcessor
 {
 public:
     MDLChopperTremAudioProcessor();
@@ -24,7 +25,10 @@ public:
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    const juce::String getProgramName (int index) override
+    {
+        return index == 0 ? juce::String ("MDL Chopper Trem 01") : juce::String();
+    }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -42,8 +46,10 @@ private:
     double bpm = 120.0;
 
     juce::AudioBuffer<float> dryBuffer;
+    juce::AudioBuffer<float> doublePrecisionBuffer;
 
     void rebuildPattern();
+    void refreshTempoFromHost();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MDLChopperTremAudioProcessor)
 };

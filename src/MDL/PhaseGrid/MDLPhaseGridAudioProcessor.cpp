@@ -1,7 +1,7 @@
 #include "MDLPhaseGridAudioProcessor.h"
 
 MDLPhaseGridAudioProcessor::MDLPhaseGridAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "PHASE_GRID", createParameterLayout())
@@ -10,10 +10,12 @@ MDLPhaseGridAudioProcessor::MDLPhaseGridAudioProcessor()
 
 void MDLPhaseGridAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = juce::jmax (sampleRate, 44100.0);
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
     lastBlockSize = (juce::uint32) juce::jmax (1, samplesPerBlock);
-    ensureStageState (getTotalNumOutputChannels(),
-                      juce::jlimit (2, 12, *apvts.getRawParameterValue ("stages")));
+    const auto channels = juce::jmax (1, getTotalNumOutputChannels());
+    const auto stageValue = apvts.getRawParameterValue ("stages");
+    const auto targetStages = stageValue != nullptr ? (int) stageValue->load() : 6;
+    ensureStageState (channels, juce::jlimit (2, 12, targetStages));
 }
 
 void MDLPhaseGridAudioProcessor::releaseResources()
@@ -163,10 +165,6 @@ void MDLPhaseGridAudioProcessor::ensureStageState (int numChannels, int numStage
     if (numChannels <= 0 || numStages <= 0)
         return;
 
-    juce::dsp::ProcessSpec spec { currentSampleRate,
-                                  lastBlockSize > 0 ? lastBlockSize : 512u,
-                                  1 };
-
     if ((int) channelStages.size() < numChannels)
         channelStages.resize (numChannels);
 
@@ -176,12 +174,25 @@ void MDLPhaseGridAudioProcessor::ensureStageState (int numChannels, int numStage
         {
             const auto previous = (int) stageVector.size();
             stageVector.resize (numStages);
-            for (int s = previous; s < numStages; ++s)
-            {
-                stageVector[s].filter.prepare (spec);
-                stageVector[s].filter.reset();
-            }
         }
+    }
+
+    const auto targetBlock = lastBlockSize > 0 ? lastBlockSize : 512u;
+    const bool specChanged = ! juce::approximatelyEqual (stageSpecSampleRate, currentSampleRate)
+                             || stageSpecBlockSize != targetBlock;
+
+    if (specChanged)
+    {
+        juce::dsp::ProcessSpec spec { currentSampleRate, targetBlock, 1 };
+        for (auto& stageVector : channelStages)
+            for (auto& stage : stageVector)
+            {
+                stage.filter.prepare (spec);
+                stage.filter.reset();
+            }
+
+        stageSpecSampleRate = currentSampleRate;
+        stageSpecBlockSize = targetBlock;
     }
 }
 
@@ -211,4 +222,14 @@ void MDLPhaseGridAudioProcessor::updateStageCoefficients (float centreFreq, floa
                 lfoPhase[ch] -= juce::MathConstants<float>::twoPi;
         }
     }
+}
+
+juce::AudioProcessorEditor* MDLPhaseGridAudioProcessor::createEditor()
+{
+    return new MDLPhaseGridAudioProcessorEditor (*this);
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new MDLPhaseGridAudioProcessor();
 }

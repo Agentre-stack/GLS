@@ -1,7 +1,7 @@
 #include "MDLFlangerJetAudioProcessor.h"
 
 MDLFlangerJetAudioProcessor::MDLFlangerJetAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "FLANGER_JET", createParameterLayout())
@@ -10,9 +10,11 @@ MDLFlangerJetAudioProcessor::MDLFlangerJetAudioProcessor()
 
 void MDLFlangerJetAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = juce::jmax (sampleRate, 44100.0);
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
     lastBlockSize = (juce::uint32) juce::jmax (1, samplesPerBlock);
-    ensureStateSize (getTotalNumOutputChannels());
+    const auto channels = juce::jmax (1, getTotalNumOutputChannels());
+    dryBuffer.setSize (channels, (int) lastBlockSize);
+    ensureStateSize (channels);
     updateDelayBounds();
 }
 
@@ -43,6 +45,7 @@ void MDLFlangerJetAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer
     const int numSamples  = buffer.getNumSamples();
 
     ensureStateSize (numChannels);
+    dryBuffer.setSize (numChannels, numSamples, false, false, true);
     dryBuffer.makeCopyOf (buffer, true);
     updateDelayBounds();
 
@@ -169,23 +172,29 @@ void MDLFlangerJetAudioProcessor::ensureStateSize (int numChannels)
     if (numChannels <= 0)
         return;
 
-    juce::dsp::ProcessSpec spec { currentSampleRate,
-                                  lastBlockSize > 0 ? lastBlockSize : 512u,
-                                  1 };
     if ((int) lines.size() < numChannels)
     {
         const auto previous = (int) lines.size();
         lines.resize (numChannels);
         for (int ch = previous; ch < numChannels; ++ch)
-        {
-            lines[ch].delay.prepare (spec);
-            lines[ch].delay.reset();
-        }
+            lines[ch].lfoPhase = juce::Random::getSystemRandom().nextFloat() * juce::MathConstants<float>::twoPi;
     }
-    else
+
+    const auto targetBlock = lastBlockSize > 0 ? lastBlockSize : 512u;
+    const bool specChanged = ! juce::approximatelyEqual (delaySpecSampleRate, currentSampleRate)
+                             || delaySpecBlockSize != targetBlock;
+
+    if (specChanged)
     {
+        juce::dsp::ProcessSpec spec { currentSampleRate, targetBlock, 1 };
         for (auto& line : lines)
+        {
             line.delay.prepare (spec);
+            line.delay.reset();
+        }
+
+        delaySpecSampleRate = currentSampleRate;
+        delaySpecBlockSize = targetBlock;
     }
 }
 
@@ -194,4 +203,10 @@ void MDLFlangerJetAudioProcessor::updateDelayBounds()
     const int maxSamples = (int) juce::jlimit (1.0, (double) currentSampleRate * 0.1, (double) currentSampleRate * 0.1);
     for (auto& line : lines)
         line.delay.setMaximumDelayInSamples (maxSamples);
+}
+
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new MDLFlangerJetAudioProcessor();
 }

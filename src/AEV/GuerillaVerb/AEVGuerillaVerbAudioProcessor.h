@@ -1,9 +1,10 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "../../DualPrecisionAudioProcessor.h"
 #include <array>
 
-class AEVGuerillaVerbAudioProcessor : public juce::AudioProcessor
+class AEVGuerillaVerbAudioProcessor : public DualPrecisionAudioProcessor
 {
 public:
     AEVGuerillaVerbAudioProcessor();
@@ -25,7 +26,7 @@ public:
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    const juce::String getProgramName (int index) override { return index == 0 ? juce::String (JucePlugin_Name " 01") : juce::String(); }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -61,7 +62,7 @@ private:
     juce::uint32 lastBlockSize = 512;
     std::array<float, 2> modulationPhase { 0.0f, 0.5f };
 
-    void ensureStateSize (int numChannels);
+    void ensureStateSize (int numChannels, int numSamples);
     void updateFilters (float hpf, float lpf);
     void updateReverbParameters (float size, float decay, float density, float damping, float width, float erLevel);
     float processDiffusion (int channel, float input, float density, float damping, float irBlend);
@@ -84,7 +85,7 @@ private:
 
     juce::OwnedArray<juce::Slider> sliders;
     juce::OwnedArray<juce::Label> labels;
-    juce::OwnedArray<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> attachments;
+    juce::OwnedArray<juce::AudioProcessorValueTreeState::SliderAttachment> attachments;
 
     void addSlider (const juce::String& paramId, const juce::String& labelText);
 

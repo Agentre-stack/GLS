@@ -1,10 +1,66 @@
 #include "DYNMultiBandMasterAudioProcessor.h"
 
+namespace
+{
+constexpr auto kStateId      = "MULTIBAND_MASTER";
+constexpr auto kParamBypass  = "ui_bypass";
+constexpr auto kParamInput   = "input_trim";
+constexpr auto kParamOutput  = "output_trim";
+}
+
+const std::array<DYNMultiBandMasterAudioProcessor::Preset, 3> DYNMultiBandMasterAudioProcessor::presetBank {{
+    { "Master Gentle", {
+        { "band1_freq",   120.0f },
+        { "band2_freq",   650.0f },
+        { "band3_freq",  3200.0f },
+        { "band1_thresh",-24.0f },
+        { "band2_thresh",-18.0f },
+        { "band3_thresh",-14.0f },
+        { "band1_ratio",   2.0f },
+        { "band2_ratio",   2.3f },
+        { "band3_ratio",   2.5f },
+        { "mix",           0.85f },
+        { kParamInput,     0.0f },
+        { kParamOutput,    0.5f },
+        { kParamBypass,    0.0f }
+    }},
+    { "Mix Glue", {
+        { "band1_freq",   140.0f },
+        { "band2_freq",   900.0f },
+        { "band3_freq",  4500.0f },
+        { "band1_thresh",-20.0f },
+        { "band2_thresh",-16.0f },
+        { "band3_thresh",-12.0f },
+        { "band1_ratio",   2.4f },
+        { "band2_ratio",   2.8f },
+        { "band3_ratio",   3.0f },
+        { "mix",           0.78f },
+        { kParamInput,     0.0f },
+        { kParamOutput,    0.0f },
+        { kParamBypass,    0.0f }
+    }},
+    { "Vocal Pop", {
+        { "band1_freq",   150.0f },
+        { "band2_freq",  1200.0f },
+        { "band3_freq",  5200.0f },
+        { "band1_thresh",-26.0f },
+        { "band2_thresh",-18.0f },
+        { "band3_thresh",-10.0f },
+        { "band1_ratio",   1.8f },
+        { "band2_ratio",   2.5f },
+        { "band3_ratio",   3.2f },
+        { "mix",           0.88f },
+        { kParamInput,     0.0f },
+        { kParamOutput,    0.5f },
+        { kParamBypass,    0.0f }
+    }}
+}};
+
 DYNMultiBandMasterAudioProcessor::DYNMultiBandMasterAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
-      apvts (*this, nullptr, "MULTIBAND_MASTER", createParameterLayout())
+      apvts (*this, nullptr, kStateId, createParameterLayout())
 {
 }
 
@@ -31,6 +87,9 @@ void DYNMultiBandMasterAudioProcessor::processBlock (juce::AudioBuffer<float>& b
 
     auto read = [this](const char* id) { return apvts.getRawParameterValue (id)->load(); };
 
+    if (apvts.getRawParameterValue (kParamBypass)->load() > 0.5f)
+        return;
+
     std::array<float, 3> freqs {
         read ("band1_freq"),
         read ("band2_freq"),
@@ -50,9 +109,12 @@ void DYNMultiBandMasterAudioProcessor::processBlock (juce::AudioBuffer<float>& b
     };
 
     const auto mix       = juce::jlimit (0.0f, 1.0f, read ("mix"));
-    const auto outputDb  = read ("output_trim");
+    const auto inputDb   = read (kParamInput);
+    const auto outputDb  = read (kParamOutput);
+    const auto inputGain = juce::Decibels::decibelsToGain (inputDb);
     const auto outputGain= juce::Decibels::decibelsToGain (outputDb);
 
+    buffer.applyGain (inputGain);
     dryBuffer.makeCopyOf (buffer, true);
 
     lastBlockSize = (juce::uint32) juce::jmax (1, buffer.getNumSamples());
@@ -144,67 +206,120 @@ DYNMultiBandMasterAudioProcessor::createParameterLayout()
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("band3_ratio", "Band3 Ratio",
                                                                    juce::NormalisableRange<float> (1.0f, 10.0f, 0.01f, 0.5f), 3.0f));
 
+    params.push_back (std::make_unique<juce::AudioParameterFloat> (kParamInput, "Input Trim",
+                                                                   juce::NormalisableRange<float> (-18.0f, 18.0f, 0.1f), 0.0f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("mix", "Mix",
                                                                    juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 1.0f));
-    params.push_back (std::make_unique<juce::AudioParameterFloat> ("output_trim", "Output Trim",
+    params.push_back (std::make_unique<juce::AudioParameterFloat> (kParamOutput, "Output Trim",
                                                                    juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f));
+    params.push_back (std::make_unique<juce::AudioParameterBool> (kParamBypass, "Soft Bypass", false));
 
     return { params.begin(), params.end() };
 }
 
 DYNMultiBandMasterAudioProcessorEditor::DYNMultiBandMasterAudioProcessorEditor (DYNMultiBandMasterAudioProcessor& p)
-    : juce::AudioProcessorEditor (&p), processorRef (p)
+    : juce::AudioProcessorEditor (&p), processorRef (p),
+      accentColour (gls::ui::accentForFamily ("DYN")),
+      headerComponent ("DYN.MultiBandMaster", "MultiBand Master")
 {
+    lookAndFeel.setAccentColour (accentColour);
+    setLookAndFeel (&lookAndFeel);
+    headerComponent.setAccentColour (accentColour);
+    footerComponent.setAccentColour (accentColour);
+
+    addAndMakeVisible (headerComponent);
+    addAndMakeVisible (footerComponent);
+
     for (size_t i = 0; i < freqSliders.size(); ++i)
     {
-        initSlider (freqSliders[i], juce::String ("Freq " + juce::String ((int) i + 1)));
-        initSlider (threshSliders[i], juce::String ("Thresh " + juce::String ((int) i + 1)));
+        initSlider (freqSliders[i], juce::String ("Freq " + juce::String ((int) i + 1)), true);
+        initSlider (threshSliders[i], juce::String ("Thresh " + juce::String ((int) i + 1)), true);
         initSlider (ratioSliders[i], juce::String ("Ratio " + juce::String ((int) i + 1)));
     }
     initSlider (mixSlider,       "Mix");
+    initSlider (inputTrimSlider, "Input");
     initSlider (outputTrimSlider,"Output");
+    initToggle (bypassButton);
 
     auto& state = processorRef.getValueTreeState();
     const juce::StringArray ids {
         "band1_freq", "band2_freq", "band3_freq",
         "band1_thresh", "band2_thresh", "band3_thresh",
         "band1_ratio", "band2_ratio", "band3_ratio",
-        "mix", "output_trim"
+        "mix", kParamInput, kParamOutput
     };
 
     std::vector<juce::Slider*> sliders = {
         &freqSliders[0], &freqSliders[1], &freqSliders[2],
         &threshSliders[0], &threshSliders[1], &threshSliders[2],
         &ratioSliders[0], &ratioSliders[1], &ratioSliders[2],
-        &mixSlider, &outputTrimSlider
+        &mixSlider, &inputTrimSlider, &outputTrimSlider
     };
 
     for (size_t i = 0; i < sliders.size(); ++i)
         attachments.push_back (std::make_unique<SliderAttachment> (state, ids[(int) i], *sliders[i]));
 
-    setSize (860, 360);
+    buttonAttachments.push_back (std::make_unique<ButtonAttachment> (state, kParamBypass, bypassButton));
+
+    setSize (900, 460);
 }
 
-void DYNMultiBandMasterAudioProcessorEditor::initSlider (juce::Slider& slider, const juce::String& label)
+void DYNMultiBandMasterAudioProcessorEditor::initSlider (juce::Slider& slider, const juce::String& label, bool macro)
 {
+    slider.setLookAndFeel (&lookAndFeel);
     slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 70, 18);
+    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, macro ? 72 : 64, 18);
     slider.setName (label);
     addAndMakeVisible (slider);
+
+    auto labelPtr = std::make_unique<juce::Label>();
+    labelPtr->setText (label, juce::dontSendNotification);
+    labelPtr->setJustificationType (juce::Justification::centred);
+    labelPtr->setColour (juce::Label::textColourId, gls::ui::Colours::text());
+    labelPtr->setFont (gls::ui::makeFont (12.0f));
+    addAndMakeVisible (*labelPtr);
+    labels.push_back (std::move (labelPtr));
+}
+
+void DYNMultiBandMasterAudioProcessorEditor::initToggle (juce::ToggleButton& toggle)
+{
+    toggle.setLookAndFeel (&lookAndFeel);
+    toggle.setClickingTogglesState (true);
+    addAndMakeVisible (toggle);
+}
+
+void DYNMultiBandMasterAudioProcessorEditor::layoutLabels()
+{
+    std::vector<juce::Slider*> sliders = {
+        &freqSliders[0], &freqSliders[1], &freqSliders[2],
+        &threshSliders[0], &threshSliders[1], &threshSliders[2],
+        &ratioSliders[0], &ratioSliders[1], &ratioSliders[2],
+        &mixSlider, &inputTrimSlider, &outputTrimSlider
+    };
+
+    for (size_t i = 0; i < sliders.size() && i < labels.size(); ++i)
+    {
+        if (auto* slider = sliders[i])
+            labels[i]->setBounds (slider->getBounds().withHeight (18).translated (0, -20));
+    }
 }
 
 void DYNMultiBandMasterAudioProcessorEditor::paint (juce::Graphics& g)
 {
-    g.fillAll (juce::Colours::black);
-    g.setColour (juce::Colours::white);
-    g.setFont (16.0f);
-    g.drawFittedText ("DYN MultiBand Master", getLocalBounds().removeFromTop (24), juce::Justification::centred, 1);
+    g.fillAll (gls::ui::Colours::background());
+    auto body = getLocalBounds().withTrimmedTop (64).withTrimmedBottom (64);
+    g.setColour (gls::ui::Colours::panel().darker (0.25f));
+    g.fillRoundedRectangle (body.toFloat().reduced (8.0f), 10.0f);
 }
 
 void DYNMultiBandMasterAudioProcessorEditor::resized()
 {
-    auto area = getLocalBounds().reduced (10);
-    auto bandArea = area.removeFromTop (area.getHeight() * 2 / 3);
+    auto bounds = getLocalBounds();
+    headerComponent.setBounds (bounds.removeFromTop (64));
+    footerComponent.setBounds (bounds.removeFromBottom (64));
+
+    auto area = bounds.reduced (12);
+    auto bandArea = area.removeFromTop (juce::roundToInt (area.getHeight() * 0.65f));
 
     auto layoutRow = [](juce::Rectangle<int> bounds, std::initializer_list<juce::Component*> comps)
     {
@@ -217,8 +332,14 @@ void DYNMultiBandMasterAudioProcessorEditor::resized()
     layoutRow (bandArea.removeFromTop (bandArea.getHeight() / 2), { &threshSliders[0], &threshSliders[1], &threshSliders[2] });
     layoutRow (bandArea, { &ratioSliders[0], &ratioSliders[1], &ratioSliders[2] });
 
-    mixSlider.setBounds (area.removeFromLeft (area.getWidth() / 2).reduced (8));
-    outputTrimSlider.setBounds (area.reduced (8));
+    auto bottom = area;
+    auto slot = bottom.getWidth() / 3;
+    mixSlider.setBounds (bottom.removeFromLeft (slot).reduced (8));
+    inputTrimSlider.setBounds (bottom.removeFromLeft (slot).reduced (8));
+    outputTrimSlider.setBounds (bottom.removeFromLeft (slot).reduced (8));
+    bypassButton.setBounds (footerComponent.getBounds().reduced (24, 12));
+
+    layoutLabels();
 }
 
 juce::AudioProcessorEditor* DYNMultiBandMasterAudioProcessor::createEditor()
@@ -278,4 +399,47 @@ float DYNMultiBandMasterAudioProcessor::computeCompressorGain (float levelDb, fl
     const float over = levelDb - threshDb;
     const float compressed = threshDb + over / ratio;
     return juce::Decibels::decibelsToGain (compressed - levelDb);
+}
+
+int DYNMultiBandMasterAudioProcessor::getNumPrograms()
+{
+    return (int) presetBank.size();
+}
+
+const juce::String DYNMultiBandMasterAudioProcessor::getProgramName (int index)
+{
+    if (juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return presetBank[(size_t) index].name;
+    return {};
+}
+
+void DYNMultiBandMasterAudioProcessor::setCurrentProgram (int index)
+{
+    const int clamped = juce::jlimit (0, (int) presetBank.size() - 1, index);
+    if (clamped == currentPreset)
+        return;
+
+    currentPreset = clamped;
+    applyPreset (clamped);
+}
+
+void DYNMultiBandMasterAudioProcessor::applyPreset (int index)
+{
+    if (! juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return;
+
+    const auto& preset = presetBank[(size_t) index];
+    for (const auto& entry : preset.params)
+    {
+        if (auto* param = apvts.getParameter (entry.first))
+        {
+            auto norm = param->getNormalisableRange().convertTo0to1 (entry.second);
+            param->setValueNotifyingHost (norm);
+        }
+    }
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new DYNMultiBandMasterAudioProcessor();
 }

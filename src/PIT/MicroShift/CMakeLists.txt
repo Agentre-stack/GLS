@@ -9,6 +9,8 @@ juce_add_plugin(PITMicroShift
     PRODUCT_NAME "PIT Micro Shift"
 )
 
+juce_generate_juce_header(PITMicroShift)
+
 target_sources(PITMicroShift PRIVATE
     PITMicroShiftAudioProcessor.cpp
     PITMicroShiftAudioProcessor.h

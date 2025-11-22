@@ -1,16 +1,20 @@
 #include "GLSChannelStripOneAudioProcessor.h"
+#include <array>
 
 GLSChannelStripOneAudioProcessor::GLSChannelStripOneAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor (BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "CHANNEL_STRIP_ONE", createParameterLayout())
 {
 }
 
-void GLSChannelStripOneAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerBlock*/)
+void GLSChannelStripOneAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = juce::jmax (sampleRate, 44100.0);
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    const auto totalChannels = juce::jmax (2, getTotalNumOutputChannels());
+    const auto blockSize = juce::jmax (1, samplesPerBlock);
+    dryBuffer.setSize (totalChannels, blockSize);
     ensureStateSize();
 
     for (auto& state : channelStates)
@@ -37,14 +41,21 @@ void GLSChannelStripOneAudioProcessor::processBlock (juce::AudioBuffer<float>& b
 
     const auto totalNumInputChannels  = getTotalNumInputChannels();
     const auto totalNumOutputChannels = getTotalNumOutputChannels();
+    const auto numSamples             = buffer.getNumSamples();
 
     for (int i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear (i, 0, buffer.getNumSamples());
+        buffer.clear (i, 0, numSamples);
 
     auto readParam = [this](const juce::String& id)
     {
-        return apvts.getRawParameterValue (id)->load();
+        if (auto* param = apvts.getRawParameterValue (id))
+            return param->load();
+        return 0.0f;
     };
+
+    const bool bypassed   = readParam ("ui_bypass") > 0.5f;
+    if (bypassed)
+        return;
 
     const auto gateThresh  = readParam ("gate_thresh");
     const auto gateRange   = readParam ("gate_range");
@@ -58,8 +69,12 @@ void GLSChannelStripOneAudioProcessor::processBlock (juce::AudioBuffer<float>& b
     const auto highGain    = readParam ("high_gain");
     const auto satAmount   = juce::jlimit (0.0f, 1.0f, readParam ("sat_amount"));
     const auto mix         = juce::jlimit (0.0f, 1.0f, readParam ("mix"));
+    const auto inputTrim   = juce::Decibels::decibelsToGain (readParam ("input_trim"));
+    const auto outputTrim  = juce::Decibels::decibelsToGain (readParam ("output_trim"));
 
     ensureStateSize();
+    buffer.applyGain (inputTrim);
+    dryBuffer.setSize (buffer.getNumChannels(), numSamples, false, false, true);
     dryBuffer.makeCopyOf (buffer, true);
 
     const auto gateThresholdLinear = juce::Decibels::decibelsToGain (gateThresh);
@@ -69,7 +84,6 @@ void GLSChannelStripOneAudioProcessor::processBlock (juce::AudioBuffer<float>& b
     const auto releaseCoeff        = std::exp (-1.0f / ((compRelease * 0.001f) * currentSampleRate));
     const auto gateEnvCoeff        = std::exp (-1.0f / (0.005f * currentSampleRate));
 
-    const auto numSamples = buffer.getNumSamples();
     const auto totalChannels = buffer.getNumChannels();
 
     for (int ch = 0; ch < totalChannels; ++ch)
@@ -129,7 +143,7 @@ void GLSChannelStripOneAudioProcessor::processBlock (juce::AudioBuffer<float>& b
             data[i] = data[i] * mix + dry[i] * (1.0f - mix);
     }
 
-    // TODO: Saturation (EQ -> Saturation)
+    buffer.applyGain (outputTrim);
 }
 
 void GLSChannelStripOneAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
@@ -151,9 +165,10 @@ GLSChannelStripOneAudioProcessor::createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
 
-    auto dBRange   = juce::NormalisableRange<float> (-60.0f, 0.0f, 0.1f);
-    auto gainRange = juce::NormalisableRange<float> (-15.0f, 15.0f, 0.1f);
-    auto timeRange = juce::NormalisableRange<float> (0.1f, 200.0f, 0.01f, 0.25f);
+    auto dBRange    = juce::NormalisableRange<float> (-60.0f, 0.0f, 0.1f);
+    auto gainRange  = juce::NormalisableRange<float> (-15.0f, 15.0f, 0.1f);
+    auto timeRange  = juce::NormalisableRange<float> (0.1f, 200.0f, 0.01f, 0.25f);
+    auto trimRange  = juce::NormalisableRange<float> (-24.0f, 24.0f, 0.1f);
 
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("gate_thresh",  "Gate Thresh", dBRange, -40.0f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("gate_range",   "Gate Range",  juce::NormalisableRange<float> (0.0f, 60.0f, 0.1f), 20.0f));
@@ -167,83 +182,298 @@ GLSChannelStripOneAudioProcessor::createParameterLayout()
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("high_gain",    "High Gain",    gainRange, 0.0f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("sat_amount",   "Sat Amount",   juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.2f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("mix",          "Mix",          juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 1.0f));
+    params.push_back (std::make_unique<juce::AudioParameterFloat> ("input_trim",   "Input Trim",   trimRange, 0.0f));
+    params.push_back (std::make_unique<juce::AudioParameterFloat> ("output_trim",  "Output Trim",  trimRange, 0.0f));
+    params.push_back (std::make_unique<juce::AudioParameterBool>  ("ui_bypass",    "Soft Bypass",  false));
 
     return { params.begin(), params.end() };
 }
 
-GLSChannelStripOneAudioProcessorEditor::GLSChannelStripOneAudioProcessorEditor (GLSChannelStripOneAudioProcessor& p)
-    : juce::AudioProcessorEditor (&p), processorRef (p)
+class ChannelStripVisual : public juce::Component, private juce::Timer
 {
-    auto makeSlider = [this](juce::Slider& slider, const juce::String& label)
+public:
+    ChannelStripVisual (juce::AudioProcessorValueTreeState& state, juce::Colour accentColour)
+        : apvts (state), accent (accentColour)
     {
-        initialiseSlider (slider, label);
-    };
+        auto fetch = [&state](const juce::String& id) -> std::atomic<float>*
+        {
+            return state.getRawParameterValue (id);
+        };
 
-    makeSlider (gateThreshSlider,  "Gate Thresh");
-    makeSlider (gateRangeSlider,   "Gate Range");
-    makeSlider (compThreshSlider,  "Comp Thresh");
-    makeSlider (compRatioSlider,   "Comp Ratio");
-    makeSlider (compAttackSlider,  "Attack");
-    makeSlider (compReleaseSlider, "Release");
-    makeSlider (lowGainSlider,     "Low");
-    makeSlider (lowMidGainSlider,  "LowMid");
-    makeSlider (highMidGainSlider, "HighMid");
-    makeSlider (highGainSlider,    "High");
-    makeSlider (satAmountSlider,   "Sat");
-    makeSlider (mixSlider,         "Mix");
+        gateRange   = fetch ("gate_range");
+        compRatio   = fetch ("comp_ratio");
+        compThresh  = fetch ("comp_thresh");
+        gateThresh  = fetch ("gate_thresh");
+        satAmount   = fetch ("sat_amount");
+        lowGain     = fetch ("low_gain");
+        lowMidGain  = fetch ("low_mid_gain");
+        highMidGain = fetch ("high_mid_gain");
+        highGain    = fetch ("high_gain");
+
+        startTimerHz (30);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (gls::ui::Colours::panel());
+        auto bounds = getLocalBounds().toFloat().reduced (12.0f);
+
+        g.setColour (gls::ui::Colours::grid());
+        for (int i = 1; i < 4; ++i)
+        {
+            const auto y = bounds.getY() + bounds.getHeight() * (float) i / 4.0f;
+            g.drawLine (bounds.getX(), y, bounds.getRight(), y, 1.0f);
+        }
+
+        auto dynamicArea = bounds.removeFromTop (bounds.getHeight() * 0.35f).reduced (8.0f);
+        auto gateArea = dynamicArea.removeFromLeft (dynamicArea.getWidth() * 0.48f).reduced (8.0f);
+        auto compArea = dynamicArea.reduced (8.0f);
+
+        auto drawMeter = [&g, this](juce::Rectangle<float> meterBounds, float value, const juce::String& label)
+        {
+            g.setColour (gls::ui::Colours::outline());
+            g.drawRoundedRectangle (meterBounds, 6.0f, 1.5f);
+            auto fill = meterBounds.withHeight (meterBounds.getHeight() * juce::jlimit (0.0f, 1.0f, value)).withBottom (meterBounds.getBottom());
+            g.setColour (accent.withMultipliedAlpha (0.8f));
+            g.fillRoundedRectangle (fill, 6.0f);
+            g.setColour (gls::ui::Colours::textSecondary());
+            g.setFont (gls::ui::makeFont (12.0f));
+            g.drawFittedText (label, meterBounds.toNearestInt(), juce::Justification::centred, 1);
+        };
+
+        const auto gateValue = gateRange != nullptr ? std::abs (gateRange->load()) / 60.0f : 0.0f;
+        const auto compValue = compRatio != nullptr ? juce::jlimit (0.0f, 1.0f, 1.0f / juce::jmax (1.0f, compRatio->load())) : 0.0f;
+        drawMeter (gateArea, gateValue, "Gate");
+        drawMeter (compArea, compValue, "Comp");
+
+        auto eqArea = bounds.reduced (8.0f);
+        auto bandWidth = eqArea.getWidth() / 4.0f;
+        std::array<std::atomic<float>*, 4> eqParams { lowGain, lowMidGain, highMidGain, highGain };
+        const juce::StringArray labels { "Low", "Low Mid", "High Mid", "High" };
+
+        for (size_t i = 0; i < eqParams.size(); ++i)
+        {
+            auto bar = juce::Rectangle<float> (eqArea.getX() + (float) i * bandWidth + 8.0f,
+                                               eqArea.getY(), bandWidth - 16.0f, eqArea.getHeight());
+            g.setColour (gls::ui::Colours::outline());
+            g.drawRect (bar);
+
+            const auto value = eqParams[i] != nullptr ? (eqParams[i]->load() + 15.0f) / 30.0f : 0.5f;
+            auto filled = bar.withHeight (bar.getHeight() * juce::jlimit (0.0f, 1.0f, value)).withBottom (bar.getBottom());
+            g.setColour (accent.withMultipliedAlpha (0.7f));
+            g.fillRect (filled);
+
+            g.setColour (gls::ui::Colours::textSecondary());
+            g.setFont (gls::ui::makeFont (12.0f));
+            g.drawFittedText (labels[(int) i], bar.toNearestInt().withY (bar.getBottom() + 4).withHeight (16),
+                              juce::Justification::centred, 1);
+        }
+
+        if (satAmount != nullptr)
+        {
+            auto sat = satAmount->load();
+            auto satBounds = eqArea.removeFromTop (16.0f).translated (0.0f, -8.0f);
+            g.setColour (gls::ui::Colours::textSecondary());
+            g.drawFittedText ("Saturation", satBounds.toNearestInt(), juce::Justification::centredLeft, 1);
+            auto satMeter = satBounds.withX (satBounds.getRight() - 120.0f).withWidth (110.0f).reduced (8.0f);
+            g.setColour (gls::ui::Colours::outline());
+            g.drawRect (satMeter);
+            g.setColour (accent);
+            g.fillRect (satMeter.withWidth (satMeter.getWidth() * juce::jlimit (0.0f, 1.0f, sat)));
+        }
+    }
+
+    void timerCallback() override { repaint(); }
+
+private:
+    juce::AudioProcessorValueTreeState& apvts;
+    juce::Colour accent;
+
+    std::atomic<float>* gateRange = nullptr;
+    std::atomic<float>* compRatio = nullptr;
+    std::atomic<float>* compThresh = nullptr;
+    std::atomic<float>* gateThresh = nullptr;
+    std::atomic<float>* satAmount = nullptr;
+    std::atomic<float>* lowGain = nullptr;
+    std::atomic<float>* lowMidGain = nullptr;
+    std::atomic<float>* highMidGain = nullptr;
+    std::atomic<float>* highGain = nullptr;
+};
+
+GLSChannelStripOneAudioProcessorEditor::GLSChannelStripOneAudioProcessorEditor (GLSChannelStripOneAudioProcessor& p)
+    : juce::AudioProcessorEditor (&p),
+      processorRef (p),
+      accentColour (gls::ui::accentForFamily ("GLS")),
+      headerComponent ("GLS.ChannelStripOne", "Channel Strip One"),
+      footerComponent()
+{
+    lookAndFeel.setAccentColour (accentColour);
+    headerComponent.setAccentColour (accentColour);
+    footerComponent.setAccentColour (accentColour);
+    setLookAndFeel (&lookAndFeel);
+
+    addAndMakeVisible (headerComponent);
+    addAndMakeVisible (footerComponent);
+
+    centerVisual = std::make_unique<ChannelStripVisual> (processorRef.getValueTreeState(), accentColour);
+    addAndMakeVisible (*centerVisual);
+
+    configureSlider (gateThreshSlider,  "Gate Threshold", true);
+    configureSlider (gateRangeSlider,   "Gate Range",     true);
+    configureSlider (compThreshSlider,  "Comp Threshold", true);
+    configureSlider (compRatioSlider,   "Comp Ratio",     true);
+    configureSlider (compAttackSlider,  "Comp Attack",    false);
+    configureSlider (compReleaseSlider, "Comp Release",   false);
+    configureSlider (lowGainSlider,     "Low Gain",       false);
+    configureSlider (lowMidGainSlider,  "Low Mid Gain",   false);
+    configureSlider (highMidGainSlider, "High Mid Gain",  false);
+    configureSlider (highGainSlider,    "High Gain",      false);
+    configureSlider (satAmountSlider,   "Sat Amount",     false);
+    configureSlider (dryWetSlider,      "Dry / Wet",      false, true);
+    configureSlider (inputTrimSlider,   "Input",          false, true);
+    configureSlider (outputTrimSlider,  "Output",         false, true);
+
+    bypassButton.setButtonText ("Soft Bypass");
+    bypassButton.setLookAndFeel (&lookAndFeel);
+    bypassButton.setClickingTogglesState (true);
+    addAndMakeVisible (bypassButton);
 
     auto& state = processorRef.getValueTreeState();
-    const juce::StringArray ids {
-        "gate_thresh", "gate_range", "comp_thresh", "comp_ratio",
-        "comp_attack", "comp_release", "low_gain", "low_mid_gain",
-        "high_mid_gain", "high_gain", "sat_amount", "mix"
+    auto attachSlider = [this, &state](const char* paramID, juce::Slider& slider)
+    {
+        attachments.push_back (std::make_unique<SliderAttachment> (state, paramID, slider));
     };
 
-    juce::Slider* sliders[] = {
-        &gateThreshSlider, &gateRangeSlider, &compThreshSlider, &compRatioSlider,
-        &compAttackSlider, &compReleaseSlider, &lowGainSlider, &lowMidGainSlider,
-        &highMidGainSlider, &highGainSlider, &satAmountSlider, &mixSlider
-    };
+    attachSlider ("gate_thresh",  gateThreshSlider);
+    attachSlider ("gate_range",   gateRangeSlider);
+    attachSlider ("comp_thresh",  compThreshSlider);
+    attachSlider ("comp_ratio",   compRatioSlider);
+    attachSlider ("comp_attack",  compAttackSlider);
+    attachSlider ("comp_release", compReleaseSlider);
+    attachSlider ("low_gain",     lowGainSlider);
+    attachSlider ("low_mid_gain", lowMidGainSlider);
+    attachSlider ("high_mid_gain", highMidGainSlider);
+    attachSlider ("high_gain",    highGainSlider);
+    attachSlider ("sat_amount",   satAmountSlider);
+    attachSlider ("mix",          dryWetSlider);
+    attachSlider ("input_trim",   inputTrimSlider);
+    attachSlider ("output_trim",  outputTrimSlider);
 
-    for (int i = 0; i < ids.size(); ++i)
-        attachments.push_back (std::make_unique<SliderAttachment> (state, ids[i], *sliders[i]));
+    buttonAttachments.push_back (std::make_unique<ButtonAttachment> (state, "ui_bypass", bypassButton));
 
-    setSize (720, 360);
+    setSize (960, 600);
 }
 
-void GLSChannelStripOneAudioProcessorEditor::initialiseSlider (juce::Slider& slider, const juce::String& name)
+GLSChannelStripOneAudioProcessorEditor::~GLSChannelStripOneAudioProcessorEditor()
 {
-    slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 70, 18);
-    slider.setName (name);
+    setLookAndFeel (nullptr);
+}
+
+void GLSChannelStripOneAudioProcessorEditor::configureSlider (juce::Slider& slider, const juce::String& name,
+                                                              bool isMacro, bool isLinear)
+{
+    slider.setLookAndFeel (&lookAndFeel);
+    slider.setSliderStyle (isLinear ? juce::Slider::LinearHorizontal
+                                    : juce::Slider::RotaryHorizontalVerticalDrag);
+    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, isMacro ? 70 : 60, 20);
+    slider.setColour (juce::Slider::rotarySliderFillColourId, accentColour);
+    slider.setColour (juce::Slider::thumbColourId, accentColour);
+    slider.setColour (juce::Slider::trackColourId, accentColour);
     addAndMakeVisible (slider);
+
+    auto label = std::make_unique<juce::Label>();
+    label->setText (name, juce::dontSendNotification);
+    label->setJustificationType (juce::Justification::centred);
+    label->setColour (juce::Label::textColourId, gls::ui::Colours::text());
+    label->setFont (gls::ui::makeFont (12.0f));
+    addAndMakeVisible (*label);
+    labeledSliders.push_back ({ &slider, label.get() });
+    sliderLabels.push_back (std::move (label));
 }
 
 void GLSChannelStripOneAudioProcessorEditor::paint (juce::Graphics& g)
 {
-    g.fillAll (juce::Colours::black);
-    g.setColour (juce::Colours::white);
-    g.setFont (16.0f);
-    g.drawFittedText ("GLS Channel Strip One", getLocalBounds().removeFromTop (24), juce::Justification::centred, 1);
+    g.fillAll (gls::ui::Colours::background());
+
+    auto body = getLocalBounds();
+    body.removeFromTop (64);
+    body.removeFromBottom (64);
+    g.setColour (gls::ui::Colours::panel().darker (0.3f));
+    g.fillRoundedRectangle (body.toFloat().reduced (8.0f), 8.0f);
+}
+
+void GLSChannelStripOneAudioProcessorEditor::layoutLabels()
+{
+    for (auto& entry : labeledSliders)
+    {
+        if (entry.slider == nullptr || entry.label == nullptr)
+            continue;
+
+        auto sliderBounds = entry.slider->getBounds();
+        auto labelBounds = sliderBounds.withHeight (18).translated (0, -22);
+        entry.label->setBounds (labelBounds);
+    }
 }
 
 void GLSChannelStripOneAudioProcessorEditor::resized()
 {
-    auto area = getLocalBounds().reduced (10);
-    auto rowHeight = 160;
+    auto bounds = getLocalBounds();
+    auto headerBounds = bounds.removeFromTop (64);
+    auto footerBounds = bounds.removeFromBottom (64);
+    headerComponent.setBounds (headerBounds);
+    footerComponent.setBounds (footerBounds);
 
-    auto topRow = area.removeFromTop (rowHeight);
-    auto bottomRow = area.removeFromTop (rowHeight);
+    auto body = bounds;
+    auto left = body.removeFromLeft (juce::roundToInt (body.getWidth() * 0.32f)).reduced (12);
+    auto right = body.removeFromRight (juce::roundToInt (body.getWidth() * 0.28f)).reduced (12);
+    auto centre = body.reduced (12);
 
-    auto placeRow = [](juce::Rectangle<int> bounds, std::initializer_list<juce::Component*> comps)
+    if (centerVisual != nullptr)
+        centerVisual->setBounds (centre);
+
+    auto macroHeight = left.getHeight() / 4;
+    juce::Slider* macroSliders[] = { &gateThreshSlider, &gateRangeSlider, &compThreshSlider, &compRatioSlider };
+    for (auto* slider : macroSliders)
     {
-        auto segment = bounds.getWidth() / static_cast<int> (comps.size());
-        for (auto* comp : comps)
-            comp->setBounds (bounds.removeFromLeft (segment).reduced (10));
+        auto slot = left.removeFromTop (macroHeight).reduced (8);
+        slider->setBounds (slot);
+    }
+
+    auto microArea = right;
+    auto rowHeight = microArea.getHeight() / 4;
+
+    auto placeRow = [rowHeight](juce::Rectangle<int>& area, juce::Slider* first, juce::Slider* second)
+    {
+        auto row = area.removeFromTop (rowHeight);
+        if (first != nullptr)
+            first->setBounds (row.removeFromLeft (row.getWidth() / 2).reduced (8));
+        if (second != nullptr)
+            second->setBounds (row.reduced (8));
     };
 
-    placeRow (topRow,     { &gateThreshSlider, &gateRangeSlider, &compThreshSlider, &compRatioSlider, &compAttackSlider, &compReleaseSlider });
-    placeRow (bottomRow,  { &lowGainSlider, &lowMidGainSlider, &highMidGainSlider, &highGainSlider, &satAmountSlider, &mixSlider });
+    placeRow (microArea, &compAttackSlider, &compReleaseSlider);
+    placeRow (microArea, &lowGainSlider, &lowMidGainSlider);
+    placeRow (microArea, &highMidGainSlider, &highGainSlider);
+
+    auto satRow = microArea.removeFromTop (rowHeight).reduced (8);
+    satAmountSlider.setBounds (satRow);
+
+    auto footerArea = footerBounds.reduced (32, 8);
+    auto slotWidth = footerArea.getWidth() / 4;
+
+    auto slot = footerArea.removeFromLeft (slotWidth).reduced (8);
+    inputTrimSlider.setBounds (slot);
+
+    slot = footerArea.removeFromLeft (slotWidth).reduced (8);
+    dryWetSlider.setBounds (slot);
+
+    slot = footerArea.removeFromLeft (slotWidth).reduced (8);
+    outputTrimSlider.setBounds (slot);
+
+    slot = footerArea.removeFromLeft (slotWidth).reduced (8);
+    bypassButton.setBounds (slot);
+
+    layoutLabels();
 }
 
 juce::AudioProcessorEditor* GLSChannelStripOneAudioProcessor::createEditor()

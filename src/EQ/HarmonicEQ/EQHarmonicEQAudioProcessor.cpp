@@ -1,7 +1,31 @@
 #include "EQHarmonicEQAudioProcessor.h"
 
+const std::array<EQHarmonicEQAudioProcessor::Preset, 3> EQHarmonicEQAudioProcessor::presetBank {{
+    { "Vocal Air", {
+        { "band_freq", 4500.0f },
+        { "band_gain",   3.0f },
+        { "band_q",      1.2f },
+        { "harm_type",   2.0f }, // Hybrid
+        { "mix",         0.9f }
+    }},
+    { "Synth Shine", {
+        { "band_freq", 8000.0f },
+        { "band_gain",   4.0f },
+        { "band_q",      0.8f },
+        { "harm_type",   1.0f }, // Even
+        { "mix",         0.85f }
+    }},
+    { "Master Glue", {
+        { "band_freq", 2500.0f },
+        { "band_gain",   1.5f },
+        { "band_q",      0.6f },
+        { "harm_type",   2.0f }, // Hybrid
+        { "mix",         0.7f }
+    }}
+}};
+
 EQHarmonicEQAudioProcessor::EQHarmonicEQAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "HARMONIC_EQ", createParameterLayout())
@@ -160,6 +184,28 @@ juce::AudioProcessorEditor* EQHarmonicEQAudioProcessor::createEditor()
     return new EQHarmonicEQAudioProcessorEditor (*this);
 }
 
+int EQHarmonicEQAudioProcessor::getNumPrograms()
+{
+    return (int) presetBank.size();
+}
+
+const juce::String EQHarmonicEQAudioProcessor::getProgramName (int index)
+{
+    if (juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return presetBank[(size_t) index].name;
+    return {};
+}
+
+void EQHarmonicEQAudioProcessor::setCurrentProgram (int index)
+{
+    const int clamped = juce::jlimit (0, (int) presetBank.size() - 1, index);
+    if (clamped == currentPreset)
+        return;
+
+    currentPreset = clamped;
+    applyPreset (clamped);
+}
+
 void EQHarmonicEQAudioProcessor::ensureStateSize (int numChannels)
 {
     if (numChannels <= 0)
@@ -203,5 +249,26 @@ void EQHarmonicEQAudioProcessor::updateFilters (float freq, float q, float gainD
     {
         band.base.coefficients = baseCoeffs;
         band.harmonic.coefficients = harmonicCoeffs;
+    }
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new EQHarmonicEQAudioProcessor();
+}
+
+void EQHarmonicEQAudioProcessor::applyPreset (int index)
+{
+    if (! juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return;
+
+    const auto& preset = presetBank[(size_t) index];
+    for (const auto& entry : preset.params)
+    {
+        if (auto* param = apvts.getParameter (entry.first))
+        {
+            auto norm = param->getNormalisableRange().convertTo0to1 (entry.second);
+            param->setValueNotifyingHost (norm);
+        }
     }
 }

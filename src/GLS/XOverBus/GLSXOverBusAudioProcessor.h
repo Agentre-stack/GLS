@@ -1,8 +1,10 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "../../DualPrecisionAudioProcessor.h"
+#include "../../ui/GoodluckLookAndFeel.h"
 
-class GLSXOverBusAudioProcessor : public juce::AudioProcessor
+class GLSXOverBusAudioProcessor : public DualPrecisionAudioProcessor
 {
 public:
     GLSXOverBusAudioProcessor();
@@ -24,7 +26,7 @@ public:
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    const juce::String getProgramName (int index) override { return index == 0 ? juce::String (JucePlugin_Name " 01") : juce::String(); }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -36,6 +38,7 @@ public:
 private:
     juce::AudioProcessorValueTreeState apvts;
     double currentSampleRate = 44100.0;
+    juce::uint32 lastBlockSize = 512;
 
     struct BandFilters
     {
@@ -51,6 +54,7 @@ private:
     juce::AudioBuffer<float> lowBuffer;
     juce::AudioBuffer<float> midBuffer;
     juce::AudioBuffer<float> highBuffer;
+    juce::AudioBuffer<float> originalBuffer;
 
     void prepareFilters (BandFilters& filters, int order, const juce::dsp::ProcessSpec& spec);
     void updateCoefficients (BandFilters& filters, float freq, bool isLow);
@@ -60,11 +64,13 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GLSXOverBusAudioProcessor)
 };
 
+class XOverVisual;
+
 class GLSXOverBusAudioProcessorEditor : public juce::AudioProcessorEditor
 {
 public:
     explicit GLSXOverBusAudioProcessorEditor (GLSXOverBusAudioProcessor&);
-    ~GLSXOverBusAudioProcessorEditor() override = default;
+    ~GLSXOverBusAudioProcessorEditor() override;
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -72,26 +78,40 @@ public:
 private:
     GLSXOverBusAudioProcessor& processorRef;
 
+    juce::Colour accentColour;
+    gls::ui::GoodluckLookAndFeel lookAndFeel;
+    gls::ui::GoodluckHeader headerComponent;
+    gls::ui::GoodluckFooter footerComponent;
+    std::unique_ptr<XOverVisual> centerVisual;
+
     juce::Slider split1Slider;
     juce::Slider split2Slider;
     juce::Slider slopeSlider;
-    juce::ToggleButton band1SoloButton { "Band 1" };
-    juce::ToggleButton band2SoloButton { "Band 2" };
-    juce::ToggleButton band3SoloButton { "Band 3" };
-    juce::Slider outputSlider;
+    juce::ToggleButton band1SoloButton { "Low" };
+    juce::ToggleButton band2SoloButton { "Mid" };
+    juce::ToggleButton band3SoloButton { "High" };
+    juce::Slider inputTrimSlider;
+    juce::Slider dryWetSlider;
+    juce::Slider outputTrimSlider;
+    juce::ToggleButton bypassButton { "Soft Bypass" };
 
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
     using ButtonAttachment = juce::AudioProcessorValueTreeState::ButtonAttachment;
+    std::vector<std::unique_ptr<SliderAttachment>> sliderAttachments;
+    std::vector<std::unique_ptr<ButtonAttachment>> buttonAttachments;
 
-    std::unique_ptr<SliderAttachment> split1Attachment;
-    std::unique_ptr<SliderAttachment> split2Attachment;
-    std::unique_ptr<SliderAttachment> slopeAttachment;
-    std::unique_ptr<ButtonAttachment> band1Attachment;
-    std::unique_ptr<ButtonAttachment> band2Attachment;
-    std::unique_ptr<ButtonAttachment> band3Attachment;
-    std::unique_ptr<SliderAttachment> outputAttachment;
+    struct LabeledSliderRef
+    {
+        juce::Slider* slider = nullptr;
+        juce::Label* label = nullptr;
+    };
 
-    void initSlider (juce::Slider& slider, const juce::String& label);
+    std::vector<std::unique_ptr<juce::Label>> sliderLabels;
+    std::vector<LabeledSliderRef> labeledSliders;
+
+    void configureSlider (juce::Slider& slider, const juce::String& labelText, bool isMacro, bool isLinear = false);
+    void configureToggle (juce::ToggleButton& toggle, const juce::String& labelText);
+    void layoutLabels();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GLSXOverBusAudioProcessorEditor)
 };

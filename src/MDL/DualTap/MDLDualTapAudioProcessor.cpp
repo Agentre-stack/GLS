@@ -1,7 +1,7 @@
 #include "MDLDualTapAudioProcessor.h"
 
 MDLDualTapAudioProcessor::MDLDualTapAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "DUAL_TAP", createParameterLayout())
@@ -10,9 +10,11 @@ MDLDualTapAudioProcessor::MDLDualTapAudioProcessor()
 
 void MDLDualTapAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = juce::jmax (sampleRate, 44100.0);
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
     lastBlockSize = (juce::uint32) juce::jmax (1, samplesPerBlock);
-    ensureStateSize (getTotalNumOutputChannels());
+    const auto channels = juce::jmax (1, getTotalNumOutputChannels());
+    dryBuffer.setSize (channels, (int) lastBlockSize);
+    ensureStateSize (channels);
 
     juce::dsp::ProcessSpec spec { currentSampleRate, lastBlockSize, 1 };
     auto prepareTap = [&](auto& taps)
@@ -66,6 +68,7 @@ void MDLDualTapAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     lastBlockSize = (juce::uint32) juce::jmax (1, numSamples);
     ensureStateSize (numChannels);
+    dryBuffer.setSize (numChannels, numSamples, false, false, true);
     dryBuffer.makeCopyOf (buffer, true);
 
     updateFilters (hpf, lpf);
@@ -82,7 +85,7 @@ void MDLDualTapAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     for (int ch = 0; ch < numChannels; ++ch)
     {
         auto* wetData = buffer.getWritePointer (ch);
-        auto* dryData = dryBuffer.getReadPointer (ch);
+        const auto* dryData = dryBuffer.getReadPointer (ch);
         auto& tapStateA = tapA[ch];
         auto& tapStateB = tapB[ch];
 
@@ -96,11 +99,11 @@ void MDLDualTapAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             float delayedA = tapStateA.delay.popSample (0);
             float delayedB = tapStateB.delay.popSample (0);
 
-            delayedA = tapStateA.hpf.processSample (0, delayedA);
-            delayedA = tapStateA.lpf.processSample (0, delayedA);
+            delayedA = tapStateA.hpf.processSample (delayedA);
+            delayedA = tapStateA.lpf.processSample (delayedA);
 
-            delayedB = tapStateB.hpf.processSample (0, delayedB);
-            delayedB = tapStateB.lpf.processSample (0, delayedB);
+            delayedB = tapStateB.hpf.processSample (delayedB);
+            delayedB = tapStateB.lpf.processSample (delayedB);
 
             tapStateA.delay.pushSample (0, drySample + delayedA * feedback);
             tapStateB.delay.pushSample (0, drySample + delayedB * feedback);
@@ -225,6 +228,33 @@ void MDLDualTapAudioProcessor::ensureStateSize (int numChannels)
         tapA.resize (numChannels);
     if ((int) tapB.size() < numChannels)
         tapB.resize (numChannels);
+
+    const auto targetBlockSize = lastBlockSize > 0 ? lastBlockSize : 512u;
+    const bool specChanged = ! juce::approximatelyEqual (tapSpecSampleRate, currentSampleRate)
+                             || tapSpecBlockSize != targetBlockSize;
+
+    if (specChanged || (int) tapA.size() != numChannels || (int) tapB.size() != numChannels)
+    {
+        juce::dsp::ProcessSpec spec { currentSampleRate, targetBlockSize, 1 };
+        auto prepareTap = [&](auto& taps)
+        {
+            for (auto& tap : taps)
+            {
+                tap.delay.setMaximumDelayInSamples ((int) (currentSampleRate * 2.5));
+                tap.delay.prepare (spec);
+                tap.delay.reset();
+                tap.hpf.prepare (spec);
+                tap.hpf.reset();
+                tap.lpf.prepare (spec);
+                tap.lpf.reset();
+            }
+        };
+
+        prepareTap (tapA);
+        prepareTap (tapB);
+        tapSpecSampleRate = currentSampleRate;
+        tapSpecBlockSize = targetBlockSize;
+    }
 }
 
 void MDLDualTapAudioProcessor::updateFilters (float hpf, float lpf)
@@ -248,4 +278,9 @@ void MDLDualTapAudioProcessor::updateFilters (float hpf, float lpf)
         tap.hpf.coefficients = hpCoeffs;
         tap.lpf.coefficients = lpCoeffs;
     }
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new MDLDualTapAudioProcessor();
 }

@@ -1,8 +1,10 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "../../DualPrecisionAudioProcessor.h"
+#include "../../ui/GoodluckLookAndFeel.h"
 
-class GLSChannelStripOneAudioProcessor : public juce::AudioProcessor
+class GLSChannelStripOneAudioProcessor : public DualPrecisionAudioProcessor
 {
 public:
     GLSChannelStripOneAudioProcessor();
@@ -24,7 +26,10 @@ public:
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    const juce::String getProgramName (int index) override
+    {
+        return index == 0 ? juce::String ("GLS Channel Strip One 01") : juce::String();
+    }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -61,17 +66,25 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GLSChannelStripOneAudioProcessor)
 };
 
+class ChannelStripVisual;
+
 class GLSChannelStripOneAudioProcessorEditor : public juce::AudioProcessorEditor
 {
 public:
     explicit GLSChannelStripOneAudioProcessorEditor (GLSChannelStripOneAudioProcessor&);
-    ~GLSChannelStripOneAudioProcessorEditor() override = default;
+    ~GLSChannelStripOneAudioProcessorEditor() override;
 
     void paint (juce::Graphics&) override;
     void resized() override;
 
 private:
     GLSChannelStripOneAudioProcessor& processorRef;
+
+    juce::Colour accentColour;
+    gls::ui::GoodluckLookAndFeel lookAndFeel;
+    gls::ui::GoodluckHeader headerComponent;
+    gls::ui::GoodluckFooter footerComponent;
+    std::unique_ptr<ChannelStripVisual> centerVisual;
 
     juce::Slider gateThreshSlider;
     juce::Slider gateRangeSlider;
@@ -84,12 +97,28 @@ private:
     juce::Slider highMidGainSlider;
     juce::Slider highGainSlider;
     juce::Slider satAmountSlider;
-    juce::Slider mixSlider;
+    juce::Slider dryWetSlider;
+    juce::Slider inputTrimSlider;
+    juce::Slider outputTrimSlider;
+
+    juce::ToggleButton bypassButton;
 
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
+    using ButtonAttachment = juce::AudioProcessorValueTreeState::ButtonAttachment;
     std::vector<std::unique_ptr<SliderAttachment>> attachments;
+    std::vector<std::unique_ptr<ButtonAttachment>> buttonAttachments;
 
-    void initialiseSlider (juce::Slider& slider, const juce::String& name);
+    struct LabeledSliderRef
+    {
+        juce::Slider* slider = nullptr;
+        juce::Label* label = nullptr;
+    };
+
+    std::vector<std::unique_ptr<juce::Label>> sliderLabels;
+    std::vector<LabeledSliderRef> labeledSliders;
+
+    void configureSlider (juce::Slider& slider, const juce::String& name, bool isMacro, bool isLinear = false);
+    void layoutLabels();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GLSChannelStripOneAudioProcessorEditor)
 };
