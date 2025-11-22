@@ -1,7 +1,7 @@
 #include "AEVGuerillaVerbAudioProcessor.h"
 
 AEVGuerillaVerbAudioProcessor::AEVGuerillaVerbAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "GUERILLA_VERB", createParameterLayout())
@@ -10,18 +10,12 @@ AEVGuerillaVerbAudioProcessor::AEVGuerillaVerbAudioProcessor()
 
 void AEVGuerillaVerbAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = juce::jmax (sampleRate, 44100.0);
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
     lastBlockSize = (juce::uint32) juce::jmax (1, samplesPerBlock);
 
-    juce::dsp::ProcessSpec spec { currentSampleRate, lastBlockSize, 1 };
-    for (auto& line : preDelayLines)
-    {
-        line.prepare (spec);
-        line.reset();
-    }
-
     reverb.reset();
-    ensureStateSize (getTotalNumOutputChannels());
+    modulationPhase = { 0.0f, 0.5f };
+    ensureStateSize (getTotalNumOutputChannels(), (int) lastBlockSize);
     updateFilters (120.0f, 16000.0f);
 }
 
@@ -61,7 +55,7 @@ void AEVGuerillaVerbAudioProcessor::processBlock (juce::AudioBuffer<float>& buff
     const int numSamples  = buffer.getNumSamples();
 
     lastBlockSize = (juce::uint32) juce::jmax (1, numSamples);
-    ensureStateSize (numChannels);
+    ensureStateSize (numChannels, numSamples);
 
     dryBuffer.makeCopyOf (buffer, true);
     workBuffer.makeCopyOf (buffer, true);
@@ -252,7 +246,7 @@ void AEVGuerillaVerbAudioProcessorEditor::addSlider (const juce::String& paramId
     labels.add (label);
     addAndMakeVisible (label);
 
-    attachments.add (std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+    attachments.add (new juce::AudioProcessorValueTreeState::SliderAttachment (
         processorRef.getValueTreeState(), paramId, *slider));
 }
 
@@ -288,20 +282,31 @@ juce::AudioProcessorEditor* AEVGuerillaVerbAudioProcessor::createEditor()
     return new AEVGuerillaVerbAudioProcessorEditor (*this);
 }
 
-void AEVGuerillaVerbAudioProcessor::ensureStateSize (int numChannels)
+void AEVGuerillaVerbAudioProcessor::ensureStateSize (int numChannels, int numSamples)
 {
-    if (numChannels <= 0)
+    const auto requiredChannels = juce::jmax (0, numChannels);
+    const auto samples = juce::jmax (1, numSamples > 0 ? numSamples : (int) lastBlockSize);
+
+    if (requiredChannels <= 0)
+    {
+        diffusers.clear();
+        dryBuffer.setSize (0, 0);
+        workBuffer.setSize (0, 0);
+        diffusionBuffer.setSize (0, 0);
+        preDelaySnapshot.setSize (0, 0);
         return;
+    }
 
-    juce::dsp::ProcessSpec spec { currentSampleRate,
-                                  lastBlockSize > 0 ? lastBlockSize : 512u,
-                                  1 };
+    diffusers.resize ((size_t) requiredChannels);
 
-    if ((int) diffusers.size() < numChannels)
-        diffusers.resize (numChannels);
+    juce::dsp::ProcessSpec spec {
+        currentSampleRate > 0.0 ? currentSampleRate : 44100.0,
+        (juce::uint32) samples,
+        1
+    };
 
-    for (int ch = 0; ch < numChannels; ++ch)
-        for (auto& diff : diffusers[ch])
+    for (auto& channelDiffusers : diffusers)
+        for (auto& diff : channelDiffusers)
         {
             diff.line.prepare (spec);
             diff.line.reset();
@@ -314,10 +319,10 @@ void AEVGuerillaVerbAudioProcessor::ensureStateSize (int numChannels)
         line.reset();
     }
 
-    dryBuffer.setSize (numChannels, lastBlockSize, false, false, true);
-    workBuffer.setSize (numChannels, lastBlockSize, false, false, true);
-    diffusionBuffer.setSize (numChannels, lastBlockSize, false, false, true);
-    preDelaySnapshot.setSize (numChannels, lastBlockSize, false, false, true);
+    dryBuffer.setSize (requiredChannels, samples, false, false, true);
+    workBuffer.setSize (requiredChannels, samples, false, false, true);
+    diffusionBuffer.setSize (requiredChannels, samples, false, false, true);
+    preDelaySnapshot.setSize (requiredChannels, samples, false, false, true);
     diffusionBuffer.clear();
 }
 
@@ -392,4 +397,9 @@ void AEVGuerillaVerbAudioProcessor::applyWidth (juce::AudioBuffer<float>& buffer
         left[i]  = mid + side;
         right[i] = mid - side;
     }
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new AEVGuerillaVerbAudioProcessor();
 }

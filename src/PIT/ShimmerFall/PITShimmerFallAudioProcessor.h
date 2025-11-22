@@ -1,8 +1,10 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "../../DualPrecisionAudioProcessor.h"
+#include "../common/SimplePitchShifter.h"
 
-class PITShimmerFallAudioProcessor : public juce::AudioProcessor
+class PITShimmerFallAudioProcessor : public DualPrecisionAudioProcessor
 {
 public:
     PITShimmerFallAudioProcessor();
@@ -29,7 +31,10 @@ public:
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    const juce::String getProgramName (int index) override
+    {
+        return index == 0 ? juce::String ("PIT Shimmer Fall 01") : juce::String();
+    }
     void changeProgramName (int, const juce::String&) override {}
 
     //==============================================================================
@@ -45,6 +50,9 @@ private:
     juce::dsp::Reverb reverb;
     juce::dsp::ProcessSpec currentSpec { 44100.0, 512, 2 };
     juce::AudioBuffer<float> shimmerBuffer;
+    juce::AudioBuffer<float> wetBuffer;
+    pit::SimplePitchShifter shimmerShifter;
+    std::vector<float> feedbackMemory;
 
     void updateReverbParams();
 

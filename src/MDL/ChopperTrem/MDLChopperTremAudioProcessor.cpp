@@ -1,7 +1,7 @@
 #include "MDLChopperTremAudioProcessor.h"
 
 MDLChopperTremAudioProcessor::MDLChopperTremAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor (BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "CHOPPER_TREM", createParameterLayout())
@@ -9,9 +9,13 @@ MDLChopperTremAudioProcessor::MDLChopperTremAudioProcessor()
     pattern.fill (1.0f);
 }
 
-void MDLChopperTremAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerBlock*/)
+void MDLChopperTremAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = juce::jmax (sampleRate, 44100.0);
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    const auto totalChannels = juce::jmax (1, getTotalNumOutputChannels());
+    const auto blockSize = juce::jmax (1, samplesPerBlock);
+    dryBuffer.setSize (totalChannels, blockSize);
+    refreshTempoFromHost();
     rebuildPattern();
 }
 
@@ -40,7 +44,9 @@ void MDLChopperTremAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
     const int numChannels = buffer.getNumChannels();
     const int numSamples  = buffer.getNumSamples();
 
+    dryBuffer.setSize (numChannels, numSamples, false, false, true);
     dryBuffer.makeCopyOf (buffer, true);
+    refreshTempoFromHost();
 
     const float stepRate = rateVal / 4.0f; // steps per quarter note
     const float samplesPerStep = (float) currentSampleRate * 60.0f / (float) (bpm * stepRate);
@@ -189,4 +195,21 @@ void MDLChopperTremAudioProcessorEditor::resized()
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new MDLChopperTremAudioProcessor();
+}
+
+void MDLChopperTremAudioProcessor::refreshTempoFromHost()
+{
+    if (auto* playHead = getPlayHead())
+    {
+        if (auto position = playHead->getPosition())
+        {
+            if (auto bpmValue = position->getBpm(); bpmValue.hasValue() && *bpmValue > 0.0)
+            {
+                bpm = *bpmValue;
+                return;
+            }
+        }
+    }
+
+    bpm = 120.0;
 }

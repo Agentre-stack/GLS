@@ -1,7 +1,37 @@
 #include "EQMixNotchLabAudioProcessor.h"
 
+const std::array<EQMixNotchLabAudioProcessor::Preset, 3> EQMixNotchLabAudioProcessor::presetBank {{
+    { "Vocal Clean", {
+        { "notch1_freq", 250.0f },
+        { "notch1_q",      5.0f },
+        { "notch1_depth", 12.0f },
+        { "notch2_freq", 4000.0f },
+        { "notch2_q",      4.0f },
+        { "notch2_depth", 10.0f },
+        { "listen_mode",   0.0f }
+    }},
+    { "Drum Box Cutter", {
+        { "notch1_freq", 200.0f },
+        { "notch1_q",      6.0f },
+        { "notch1_depth", 14.0f },
+        { "notch2_freq", 500.0f },
+        { "notch2_q",      5.0f },
+        { "notch2_depth", 12.0f },
+        { "listen_mode",   0.0f }
+    }},
+    { "Mix Fizz Tamer", {
+        { "notch1_freq", 7000.0f },
+        { "notch1_q",      5.5f },
+        { "notch1_depth", 12.0f },
+        { "notch2_freq", 12000.0f },
+        { "notch2_q",      4.5f },
+        { "notch2_depth", 10.0f },
+        { "listen_mode",   0.0f }
+    }}
+}};
+
 EQMixNotchLabAudioProcessor::EQMixNotchLabAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "MIX_NOTCH_LAB", createParameterLayout())
@@ -49,19 +79,23 @@ void EQMixNotchLabAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer
     notchPreview2.makeCopyOf (buffer, true);
     updateFilters (n1Freq, n1Q, n1Depth, n2Freq, n2Q, n2Depth);
 
+    juce::dsp::AudioBlock<float> mainBlock (buffer);
+    juce::dsp::AudioBlock<float> previewBlock1 (notchPreview1);
+    juce::dsp::AudioBlock<float> previewBlock2 (notchPreview2);
+
     for (int ch = 0; ch < numChannels; ++ch)
     {
-        juce::dsp::AudioBlock<float> block (buffer.getArrayOfWritePointers()[ch], 1, (size_t) numSamples);
-        juce::dsp::ProcessContextReplacing<float> ctx (block);
+        auto mainChannel = mainBlock.getSingleChannelBlock ((size_t) ch);
+        juce::dsp::ProcessContextReplacing<float> ctx (mainChannel);
         notch1Filters[ch].process (ctx);
         notch2Filters[ch].process (ctx);
 
-        juce::dsp::AudioBlock<float> preview1 (notchPreview1.getArrayOfWritePointers()[ch], 1, (size_t) numSamples);
-        juce::dsp::ProcessContextReplacing<float> previewCtx1 (preview1);
+        auto prev1Channel = previewBlock1.getSingleChannelBlock ((size_t) ch);
+        juce::dsp::ProcessContextReplacing<float> previewCtx1 (prev1Channel);
         notch1PreviewFilters[ch].process (previewCtx1);
 
-        juce::dsp::AudioBlock<float> preview2 (notchPreview2.getArrayOfWritePointers()[ch], 1, (size_t) numSamples);
-        juce::dsp::ProcessContextReplacing<float> previewCtx2 (preview2);
+        auto prev2Channel = previewBlock2.getSingleChannelBlock ((size_t) ch);
+        juce::dsp::ProcessContextReplacing<float> previewCtx2 (prev2Channel);
         notch2PreviewFilters[ch].process (previewCtx2);
     }
 
@@ -178,6 +212,28 @@ juce::AudioProcessorEditor* EQMixNotchLabAudioProcessor::createEditor()
     return new EQMixNotchLabAudioProcessorEditor (*this);
 }
 
+int EQMixNotchLabAudioProcessor::getNumPrograms()
+{
+    return (int) presetBank.size();
+}
+
+const juce::String EQMixNotchLabAudioProcessor::getProgramName (int index)
+{
+    if (juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return presetBank[(size_t) index].name;
+    return {};
+}
+
+void EQMixNotchLabAudioProcessor::setCurrentProgram (int index)
+{
+    const int clamped = juce::jlimit (0, (int) presetBank.size() - 1, index);
+    if (clamped == currentPreset)
+        return;
+
+    currentPreset = clamped;
+    applyPreset (clamped);
+}
+
 void EQMixNotchLabAudioProcessor::ensureStateSize (int numChannels)
 {
     if (numChannels <= 0)
@@ -238,4 +294,25 @@ void EQMixNotchLabAudioProcessor::updateFilters (float n1Freq, float n1Q, float 
         filter.coefficients = coeffs1;
     for (auto& filter : notch2PreviewFilters)
         filter.coefficients = coeffs2;
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new EQMixNotchLabAudioProcessor();
+}
+
+void EQMixNotchLabAudioProcessor::applyPreset (int index)
+{
+    if (! juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return;
+
+    const auto& preset = presetBank[(size_t) index];
+    for (const auto& entry : preset.params)
+    {
+        if (auto* param = apvts.getParameter (entry.first))
+        {
+            auto norm = param->getNormalisableRange().convertTo0to1 (entry.second);
+            param->setValueNotifyingHost (norm);
+        }
+    }
 }

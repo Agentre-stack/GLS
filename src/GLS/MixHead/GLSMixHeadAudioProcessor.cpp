@@ -1,7 +1,7 @@
 #include "GLSMixHeadAudioProcessor.h"
 
 GLSMixHeadAudioProcessor::GLSMixHeadAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "MIX_HEAD", createParameterLayout())
@@ -193,4 +193,9 @@ float GLSMixHeadAudioProcessor::applySaturation (float sample, float drive)
     const auto driveAmount = juce::jmap (drive, 1.0f, 8.0f);
     const auto saturated = std::tanh (sample * driveAmount);
     return juce::jmap (drive, sample, saturated);
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new GLSMixHeadAudioProcessor();
 }

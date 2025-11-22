@@ -1,7 +1,7 @@
 #include "MDLTempoLFOAudioProcessor.h"
 
 MDLTempoLFOAudioProcessor::MDLTempoLFOAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "TEMPO_LFO", createParameterLayout())
@@ -10,8 +10,10 @@ MDLTempoLFOAudioProcessor::MDLTempoLFOAudioProcessor()
 
 void MDLTempoLFOAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerBlock*/)
 {
-    currentSampleRate = juce::jmax (sampleRate, 44100.0);
-    bpm = 120.0;
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    lfoPhase = 0.0f;
+    smoothedValue = 0.0f;
+    refreshTempoFromHost();
 }
 
 void MDLTempoLFOAudioProcessor::releaseResources()
@@ -31,33 +33,39 @@ void MDLTempoLFOAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     auto get = [this](const char* id) { return apvts.getRawParameterValue (id)->load(); };
 
     const float depth    = juce::jlimit (0.0f, 1.0f, get ("depth"));
-    const float offset   = get ("offset");
+    const float offset   = juce::jlimit (-1.0f, 1.0f, get ("offset"));
     const float smoothing= juce::jlimit (0.0f, 1.0f, get ("smoothing"));
     const int shape      = (int) std::round (apvts.getRawParameterValue ("shape")->load());
-    const int syncIndex  = (int) std::round (apvts.getRawParameterValue ("sync")->load());
 
     const int numSamples = buffer.getNumSamples();
     const int numChannels = buffer.getNumChannels();
 
-    float phaseIncrement = getSyncRate();
+    refreshTempoFromHost();
+
+    const float phaseIncrement = getSyncRate();
     const float smoothCoeff = std::exp (-juce::MathConstants<float>::twoPi * smoothing / (float) currentSampleRate);
 
-    float modValue = getWaveValue (lfoPhase, shape);
+    float phase = lfoPhase;
+    float modValue = smoothedValue;
+
     for (int i = 0; i < numSamples; ++i)
     {
-        const float target = getWaveValue (lfoPhase, shape);
+        const float target = getWaveValue (phase, shape);
         modValue = smoothCoeff * modValue + (1.0f - smoothCoeff) * target;
 
-        for (int ch = 0; ch < numChannels; ++ch)
-        {
-            auto* data = buffer.getWritePointer (ch);
-            data[i] = data[i]; // audio passthrough
-        }
+        const float wet = juce::jlimit (-1.0f, 1.0f, offset + depth * modValue);
+        const float gain = juce::jlimit (0.0f, 2.0f, 1.0f + wet);
 
-        lfoPhase += phaseIncrement;
-        if (lfoPhase > juce::MathConstants<float>::twoPi)
-            lfoPhase -= juce::MathConstants<float>::twoPi;
+        for (int ch = 0; ch < numChannels; ++ch)
+            buffer.setSample (ch, i, buffer.getSample (ch, i) * gain);
+
+        phase += phaseIncrement;
+        if (phase > juce::MathConstants<float>::twoPi)
+            phase -= juce::MathConstants<float>::twoPi;
     }
+
+    lfoPhase = phase;
+    smoothedValue = modValue;
 }
 
 void MDLTempoLFOAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
@@ -156,8 +164,7 @@ float MDLTempoLFOAudioProcessor::getSyncRate() const
     const float noteLength = (syncIndex == 0 ? 1.0f :
                               syncIndex == 1 ? 0.5f :
                               syncIndex == 2 ? 0.25f : 0.125f);
-    const float beatsPerMinute = 120.0f;
-    const float beatsPerSecond = beatsPerMinute / 60.0f;
+    const float beatsPerSecond = static_cast<float> (bpm / 60.0);
     const float cyclesPerSecond = beatsPerSecond / noteLength;
     return cyclesPerSecond / (float) currentSampleRate * juce::MathConstants<float>::twoPi;
 }
@@ -171,4 +178,26 @@ float MDLTempoLFOAudioProcessor::getWaveValue (float phase, int shape) const
         case 2: return phase < juce::MathConstants<float>::pi ? 1.0f : -1.0f;
         default: return std::sin (phase);
     }
+}
+
+void MDLTempoLFOAudioProcessor::refreshTempoFromHost()
+{
+    if (auto* playHead = getPlayHead())
+    {
+        if (auto position = playHead->getPosition())
+        {
+            if (auto bpmValue = position->getBpm(); bpmValue.hasValue() && *bpmValue > 0.0)
+            {
+                bpm = *bpmValue;
+                return;
+            }
+        }
+    }
+
+    bpm = 120.0;
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new MDLTempoLFOAudioProcessor();
 }

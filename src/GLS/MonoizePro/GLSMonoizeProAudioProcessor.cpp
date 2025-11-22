@@ -1,16 +1,41 @@
 #include "GLSMonoizeProAudioProcessor.h"
 
+namespace
+{
+float normaliseLog (float value, float minHz, float maxHz)
+{
+    auto clamped = juce::jlimit (minHz, maxHz, value);
+    const auto logMin = std::log10 (minHz);
+    const auto logMax = std::log10 (maxHz);
+    const auto logVal = std::log10 (clamped);
+    return juce::jlimit (0.0f, 1.0f, (float) ((logVal - logMin) / (logMax - logMin)));
+}
+} // namespace
+
 GLSMonoizeProAudioProcessor::GLSMonoizeProAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "MONOIZE_PRO", createParameterLayout())
 {
 }
 
-void GLSMonoizeProAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerBlock*/)
+void GLSMonoizeProAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = juce::jmax (sampleRate, 44100.0);
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    lastBlockSize = (juce::uint32) juce::jmax (1, samplesPerBlock);
+
+    juce::dsp::ProcessSpec spec {
+        currentSampleRate,
+        lastBlockSize,
+        1
+    };
+
+    monoLowFilter.prepare (spec);
+    stereoHighFilter.prepare (spec);
+    monoLowFilter.reset();
+    stereoHighFilter.reset();
+
     updateFilters (apvts.getRawParameterValue ("mono_below")->load(),
                    apvts.getRawParameterValue ("stereo_above")->load());
 }
@@ -31,13 +56,24 @@ void GLSMonoizeProAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer
 
     auto read = [this](const char* id) { return apvts.getRawParameterValue (id)->load(); };
 
+    const bool bypassed = apvts.getRawParameterValue ("ui_bypass")->load() > 0.5f;
+    if (bypassed)
+        return;
+
     const auto monoBelow   = read ("mono_below");
     const auto stereoAbove = read ("stereo_above");
     const auto widthParam  = juce::jlimit (0.0f, 2.0f, read ("width"));
     const auto centerLift  = juce::Decibels::decibelsToGain (read ("center_lift"));
     const auto sideTrim    = juce::Decibels::decibelsToGain (read ("side_trim"));
+    const auto mix         = juce::jlimit (0.0f, 1.0f, read ("mix"));
+    const auto inputTrim   = juce::Decibels::decibelsToGain (read ("input_trim"));
+    const auto outputTrim  = juce::Decibels::decibelsToGain (read ("output_trim"));
 
+    lastBlockSize = (juce::uint32) juce::jmax (1, buffer.getNumSamples());
     updateFilters (monoBelow, stereoAbove);
+
+    buffer.applyGain (inputTrim);
+    dryBuffer.makeCopyOf (buffer, true);
 
     auto* left  = buffer.getWritePointer (0);
     auto* right = buffer.getWritePointer (1);
@@ -63,6 +99,18 @@ void GLSMonoizeProAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer
         left[i]  = mid + side;
         right[i] = mid - side;
     }
+    if (mix < 1.0f)
+    {
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        {
+            auto* wet = buffer.getWritePointer (ch);
+            const auto* dry = dryBuffer.getReadPointer (ch);
+            for (int i = 0; i < numSamples; ++i)
+                wet[i] = wet[i] * mix + dry[i] * (1.0f - mix);
+        }
+    }
+
+    buffer.applyGain (outputTrim);
 }
 
 void GLSMonoizeProAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
@@ -93,63 +141,234 @@ GLSMonoizeProAudioProcessor::createParameterLayout()
                                                                    juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("side_trim",    "Side Trim",
                                                                    juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f));
+    params.push_back (std::make_unique<juce::AudioParameterFloat> ("mix",          "Dry/Wet",
+                                                                   juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 1.0f));
+    params.push_back (std::make_unique<juce::AudioParameterFloat> ("input_trim",   "Input Trim",
+                                                                   juce::NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f));
+    params.push_back (std::make_unique<juce::AudioParameterFloat> ("output_trim",  "Output Trim",
+                                                                   juce::NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f));
+    params.push_back (std::make_unique<juce::AudioParameterBool> ("ui_bypass", "Soft Bypass", false));
 
     return { params.begin(), params.end() };
 }
 
-GLSMonoizeProAudioProcessorEditor::GLSMonoizeProAudioProcessorEditor (GLSMonoizeProAudioProcessor& p)
-    : juce::AudioProcessorEditor (&p), processorRef (p)
+class MonoizeVisual : public juce::Component, private juce::Timer
 {
-    auto make = [this](juce::Slider& slider, const juce::String& name) { initialiseSlider (slider, name); };
+public:
+    MonoizeVisual (juce::AudioProcessorValueTreeState& stateRef, juce::Colour accentColour)
+        : state (stateRef), accent (accentColour)
+    {
+        monoBelow   = state.getRawParameterValue ("mono_below");
+        stereoAbove = state.getRawParameterValue ("stereo_above");
+        width       = state.getRawParameterValue ("width");
+        centerLift  = state.getRawParameterValue ("center_lift");
+        sideTrim    = state.getRawParameterValue ("side_trim");
+        startTimerHz (24);
+    }
 
-    make (monoBelowSlider,   "Mono Below");
-    make (stereoAboveSlider, "Stereo Above");
-    make (widthSlider,       "Width");
-    make (centerLiftSlider,  "Center Lift");
-    make (sideTrimSlider,    "Side Trim");
+    void paint (juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds().toFloat().reduced (6.0f);
+        g.setColour (gls::ui::Colours::panel());
+        g.fillRoundedRectangle (bounds, 10.0f);
+        g.setColour (gls::ui::Colours::outline());
+        g.drawRoundedRectangle (bounds, 10.0f, 1.5f);
+
+        auto freqArea = bounds.removeFromTop (bounds.getHeight() * 0.5f).reduced (10.0f);
+        const auto monoFreqNorm   = normaliseLog (monoBelow != nullptr ? monoBelow->load() : 120.0f, 40.0f, 400.0f);
+        const auto stereoFreqNorm = normaliseLog (stereoAbove != nullptr ? stereoAbove->load() : 3000.0f, 1000.0f, 12000.0f);
+        auto monoX   = freqArea.getX() + freqArea.getWidth() * monoFreqNorm;
+        auto stereoX = freqArea.getX() + freqArea.getWidth() * stereoFreqNorm;
+        g.setColour (gls::ui::Colours::grid());
+        g.drawRect (freqArea);
+        g.setColour (accent.withAlpha (0.8f));
+        g.drawLine (monoX, freqArea.getY(), monoX, freqArea.getBottom(), 2.0f);
+        g.setColour (accent.withAlpha (0.6f));
+        g.drawLine (stereoX, freqArea.getY(), stereoX, freqArea.getBottom(), 2.0f);
+        g.setColour (gls::ui::Colours::textSecondary());
+        g.setFont (gls::ui::makeFont (11.0f));
+        g.drawFittedText ("Mono", juce::Rectangle<int> ((int) monoX - 30, (int) freqArea.getBottom(), 60, 16), juce::Justification::centred, 1);
+        g.drawFittedText ("Stereo", juce::Rectangle<int> ((int) stereoX - 30, (int) freqArea.getBottom(), 60, 16), juce::Justification::centred, 1);
+
+        auto barArea = bounds.reduced (18.0f);
+        auto midRect  = barArea.removeFromLeft (barArea.getWidth() * 0.5f - 8.0f);
+        auto sideRect = barArea.translated (barArea.getWidth() * 0.5f + 8.0f, 0);
+        drawMeter (g, midRect, accent, centerLift != nullptr ? centerLift->load() : 0.0f, -12.0f, 12.0f, "Mid");
+        drawMeter (g, sideRect, accent.withMultipliedAlpha (0.7f),
+                   sideTrim != nullptr ? sideTrim->load() + juce::Decibels::gainToDecibels (width != nullptr ? width->load() : 1.0f) : 0.0f,
+                   -12.0f, 12.0f, "Side");
+    }
+
+    void timerCallback() override { repaint(); }
+
+private:
+    static void drawMeter (juce::Graphics& g, juce::Rectangle<float> bounds, juce::Colour colour,
+                           float valueDb, float minDb, float maxDb, const juce::String& label)
+    {
+        g.setColour (gls::ui::Colours::grid());
+        g.drawRoundedRectangle (bounds, 8.0f, 1.2f);
+        const auto norm = juce::jlimit (0.0f, 1.0f, (valueDb - minDb) / (maxDb - minDb));
+        auto fill = bounds.withHeight (bounds.getHeight() * norm).withY (bounds.getBottom() - bounds.getHeight() * norm);
+        g.setColour (colour.withAlpha (0.85f));
+        g.fillRoundedRectangle (fill, 8.0f);
+        g.setColour (gls::ui::Colours::textSecondary());
+        g.setFont (gls::ui::makeFont (11.0f));
+        g.drawFittedText (label, bounds.toNearestInt().translated (0, -18), juce::Justification::centred, 1);
+    }
+
+    juce::AudioProcessorValueTreeState& state;
+    juce::Colour accent;
+    std::atomic<float>* monoBelow = nullptr;
+    std::atomic<float>* stereoAbove = nullptr;
+    std::atomic<float>* width = nullptr;
+    std::atomic<float>* centerLift = nullptr;
+    std::atomic<float>* sideTrim = nullptr;
+};
+
+GLSMonoizeProAudioProcessorEditor::GLSMonoizeProAudioProcessorEditor (GLSMonoizeProAudioProcessor& p)
+    : juce::AudioProcessorEditor (&p), processorRef (p),
+      accentColour (gls::ui::accentForFamily ("GLS")),
+      headerComponent ("GLS.MonoizePro", "Monoize Pro")
+{
+    lookAndFeel.setAccentColour (accentColour);
+    headerComponent.setAccentColour (accentColour);
+    footerComponent.setAccentColour (accentColour);
+    setLookAndFeel (&lookAndFeel);
+
+    addAndMakeVisible (headerComponent);
+    addAndMakeVisible (footerComponent);
+
+    centerVisual = std::make_unique<MonoizeVisual> (processorRef.getValueTreeState(), accentColour);
+    addAndMakeVisible (*centerVisual);
+
+    configureSlider (monoBelowSlider,   "Mono Below", true);
+    configureSlider (stereoAboveSlider, "Stereo Above", true);
+    configureSlider (widthSlider,       "Width", true);
+    configureSlider (centerLiftSlider,  "Center Lift", false);
+    configureSlider (sideTrimSlider,    "Side Trim", false);
+    configureSlider (inputTrimSlider,   "Input", false, true);
+    configureSlider (dryWetSlider,      "Dry / Wet", false, true);
+    configureSlider (outputTrimSlider,  "Output", false, true);
+    configureToggle (bypassButton);
 
     auto& state = processorRef.getValueTreeState();
-    const juce::StringArray ids { "mono_below", "stereo_above", "width", "center_lift", "side_trim" };
-    juce::Slider* sliders[]      = { &monoBelowSlider, &stereoAboveSlider, &widthSlider, &centerLiftSlider, &sideTrimSlider };
+    auto attachSlider = [this, &state](const char* paramId, juce::Slider& slider)
+    {
+        sliderAttachments.push_back (std::make_unique<SliderAttachment> (state, paramId, slider));
+    };
 
-    for (int i = 0; i < ids.size(); ++i)
-        attachments.push_back (std::make_unique<SliderAttachment> (state, ids[i], *sliders[i]));
+    attachSlider ("mono_below",   monoBelowSlider);
+    attachSlider ("stereo_above", stereoAboveSlider);
+    attachSlider ("width",        widthSlider);
+    attachSlider ("center_lift",  centerLiftSlider);
+    attachSlider ("side_trim",    sideTrimSlider);
+    attachSlider ("input_trim",   inputTrimSlider);
+    attachSlider ("mix",          dryWetSlider);
+    attachSlider ("output_trim",  outputTrimSlider);
 
-    setSize (620, 260);
+    buttonAttachments.push_back (std::make_unique<ButtonAttachment> (state, "ui_bypass", bypassButton));
+
+    setSize (920, 500);
 }
 
-void GLSMonoizeProAudioProcessorEditor::initialiseSlider (juce::Slider& slider, const juce::String& name)
+GLSMonoizeProAudioProcessorEditor::~GLSMonoizeProAudioProcessorEditor()
 {
-    slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 70, 18);
-    slider.setName (name);
+    bypassButton.setLookAndFeel (nullptr);
+    setLookAndFeel (nullptr);
+}
+
+void GLSMonoizeProAudioProcessorEditor::configureSlider (juce::Slider& slider, const juce::String& targetName,
+                                                         bool isMacro, bool isLinear)
+{
+    slider.setLookAndFeel (&lookAndFeel);
+    slider.setSliderStyle (isLinear ? juce::Slider::LinearHorizontal
+                                    : juce::Slider::RotaryHorizontalVerticalDrag);
+    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, isMacro ? 70 : 64, 20);
+    slider.setColour (juce::Slider::rotarySliderFillColourId, accentColour);
+    slider.setColour (juce::Slider::thumbColourId, accentColour);
+    slider.setColour (juce::Slider::trackColourId, accentColour);
     addAndMakeVisible (slider);
+
+    auto label = std::make_unique<juce::Label>();
+    label->setText (targetName, juce::dontSendNotification);
+    label->setJustificationType (juce::Justification::centred);
+    label->setColour (juce::Label::textColourId, gls::ui::Colours::text());
+    label->setFont (gls::ui::makeFont (12.0f));
+    addAndMakeVisible (*label);
+    labeledSliders.push_back ({ &slider, label.get() });
+    sliderLabels.push_back (std::move (label));
+}
+
+void GLSMonoizeProAudioProcessorEditor::configureToggle (juce::ToggleButton& toggle)
+{
+    toggle.setLookAndFeel (&lookAndFeel);
+    toggle.setClickingTogglesState (true);
+    addAndMakeVisible (toggle);
+}
+
+void GLSMonoizeProAudioProcessorEditor::layoutLabels()
+{
+    for (auto& entry : labeledSliders)
+    {
+        if (entry.slider == nullptr || entry.label == nullptr)
+            continue;
+
+        auto sliderBounds = entry.slider->getBounds();
+        auto labelBounds = sliderBounds.withHeight (18).translated (0, -20);
+        entry.label->setBounds (labelBounds);
+    }
 }
 
 void GLSMonoizeProAudioProcessorEditor::paint (juce::Graphics& g)
 {
-    g.fillAll (juce::Colours::darkgrey);
-    g.setColour (juce::Colours::white);
-    g.setFont (16.0f);
-    g.drawFittedText ("GLS Monoize Pro", getLocalBounds().removeFromTop (24), juce::Justification::centred, 1);
+    g.fillAll (gls::ui::Colours::background());
+    auto body = getLocalBounds();
+    body.removeFromTop (64);
+    body.removeFromBottom (64);
+    g.setColour (gls::ui::Colours::panel().darker (0.25f));
+    g.fillRoundedRectangle (body.toFloat().reduced (8.0f), 8.0f);
 }
 
 void GLSMonoizeProAudioProcessorEditor::resized()
 {
-    auto area = getLocalBounds().reduced (10);
-    auto width = area.getWidth() / 5;
+    auto bounds = getLocalBounds();
+    auto headerBounds = bounds.removeFromTop (64);
+    auto footerBounds = bounds.removeFromBottom (64);
+    headerComponent.setBounds (headerBounds);
+    footerComponent.setBounds (footerBounds);
 
-    monoBelowSlider .setBounds (area.removeFromLeft (width).reduced (8));
-    stereoAboveSlider.setBounds (area.removeFromLeft (width).reduced (8));
-    widthSlider     .setBounds (area.removeFromLeft (width).reduced (8));
-    centerLiftSlider.setBounds (area.removeFromLeft (width).reduced (8));
-    sideTrimSlider  .setBounds (area.removeFromLeft (width).reduced (8));
+    auto body = bounds;
+    auto left = body.removeFromLeft (juce::roundToInt (body.getWidth() * 0.4f)).reduced (12);
+    auto centre = body.reduced (12);
+
+    if (centerVisual != nullptr)
+        centerVisual->setBounds (centre);
+
+    auto macroHeight = left.getHeight() / 3;
+    monoBelowSlider  .setBounds (left.removeFromTop (macroHeight).reduced (8));
+    stereoAboveSlider.setBounds (left.removeFromTop (macroHeight).reduced (8));
+    widthSlider      .setBounds (left.removeFromTop (macroHeight).reduced (8));
+
+    auto right = centre.removeFromRight (juce::roundToInt (centre.getWidth() * 0.35f)).reduced (12);
+    auto rightHeight = right.getHeight() / 2;
+    centerLiftSlider.setBounds (right.removeFromTop (rightHeight).reduced (8));
+    sideTrimSlider  .setBounds (right.removeFromTop (rightHeight).reduced (8));
+
+    auto footerArea = footerBounds.reduced (32, 8);
+    auto slotWidth = footerArea.getWidth() / 4;
+    inputTrimSlider .setBounds (footerArea.removeFromLeft (slotWidth).reduced (8));
+    dryWetSlider    .setBounds (footerArea.removeFromLeft (slotWidth).reduced (8));
+    outputTrimSlider.setBounds (footerArea.removeFromLeft (slotWidth).reduced (8));
+    bypassButton    .setBounds (footerArea.removeFromLeft (slotWidth).reduced (8));
+
+    layoutLabels();
 }
 
 juce::AudioProcessorEditor* GLSMonoizeProAudioProcessor::createEditor()
 {
     return new GLSMonoizeProAudioProcessorEditor (*this);
 }
+
 
 void GLSMonoizeProAudioProcessor::updateFilters (float monoFreq, float stereoFreq)
 {
@@ -163,4 +382,9 @@ void GLSMonoizeProAudioProcessor::updateFilters (float monoFreq, float stereoFre
 
     monoLowFilter.coefficients = lp;
     stereoHighFilter.coefficients = hp;
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new GLSMonoizeProAudioProcessor();
 }

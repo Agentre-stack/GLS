@@ -1,7 +1,7 @@
 #include "EQSideSliceAudioProcessor.h"
 
 EQSideSliceAudioProcessor::EQSideSliceAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "SIDE_SLICE", createParameterLayout())
@@ -210,4 +210,9 @@ void EQSideSliceAudioProcessor::updateFilterCoefficients (float midBandDb, float
     stereoFilters[0].coefficients = midCoeffs;
     sideFilter.coefficients = sideCoeffs;
     stereoFilters[1].coefficients = sideCoeffs;
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new EQSideSliceAudioProcessor();
 }

@@ -1,25 +1,31 @@
 #include "GLSMixGuardAudioProcessor.h"
 
 GLSMixGuardAudioProcessor::GLSMixGuardAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "MIX_GUARD", createParameterLayout())
 {
 }
 
-void GLSMixGuardAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerBlock*/)
+void GLSMixGuardAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = juce::jmax (sampleRate, 44100.0);
-    ensureStateSize();
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
     limiterGain = 1.0f;
     loudnessAccumulator = 0.0f;
     loudnessSamples = 0;
-    for (auto& state : channelStates)
-    {
-        state.delayLine.reset();
-        state.previousSample = 0.0f;
-    }
+
+    const auto blockSize = juce::jmax (1, samplesPerBlock);
+    delaySpec.sampleRate = currentSampleRate;
+    delaySpec.maximumBlockSize = static_cast<juce::uint32> (blockSize);
+    delaySpec.numChannels = 1;
+    delaySpecConfigured = true;
+
+    maxDelaySamples = juce::jmax (1, juce::roundToInt (currentSampleRate * 0.05));
+    delayCapacitySamples = juce::jmax (1, maxDelaySamples + 32);
+
+    ensureStateSize();
+    updateDelayCapacity();
 }
 
 void GLSMixGuardAudioProcessor::releaseResources()
@@ -48,7 +54,7 @@ void GLSMixGuardAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     juce::ignoreUnused (targetLUFS);
 
     ensureStateSize();
-    const auto lookaheadSamples = juce::roundToInt (lookahead * 0.001 * currentSampleRate);
+    const auto lookaheadSamples = juce::jlimit (0, maxDelaySamples, juce::roundToInt (lookahead * 0.001 * currentSampleRate));
     const auto releaseCoeff = std::exp (-1.0f / (releaseMs * 0.001f * currentSampleRate));
     const auto attackCoeff  = std::exp (-1.0f / (0.001f * currentSampleRate));
     const auto ceilingGain  = juce::Decibels::decibelsToGain (ceilingDb);
@@ -182,9 +188,31 @@ juce::AudioProcessorEditor* GLSMixGuardAudioProcessor::createEditor()
 
 void GLSMixGuardAudioProcessor::ensureStateSize()
 {
-    const auto requiredChannels = getTotalNumOutputChannels();
-    if (static_cast<int> (channelStates.size()) != requiredChannels)
-        channelStates.resize (requiredChannels);
+    const auto requiredChannels = juce::jmax (1, getTotalNumOutputChannels());
+    const auto previousSize = channelStates.size();
+
+    if (static_cast<int> (previousSize) == requiredChannels)
+        return;
+
+    channelStates.resize (static_cast<size_t> (requiredChannels));
+
+    if (! delaySpecConfigured || delayCapacitySamples <= 0)
+        return;
+
+    for (size_t idx = previousSize; idx < channelStates.size(); ++idx)
+        initialiseChannelState (channelStates[idx]);
+}
+
+void GLSMixGuardAudioProcessor::initialiseChannelState (ChannelState& state)
+{
+    if (! delaySpecConfigured || delayCapacitySamples <= 0)
+        return;
+
+    state.delayLine.prepare (delaySpec);
+    state.delayLine.setMaximumDelayInSamples (delayCapacitySamples);
+    state.delayLine.setDelay (0);
+    state.delayLine.reset();
+    state.previousSample = 0.0f;
 }
 
 float GLSMixGuardAudioProcessor::measureTruePeak (ChannelState& state, float currentSample, bool tpEnabled)
@@ -195,4 +223,19 @@ float GLSMixGuardAudioProcessor::measureTruePeak (ChannelState& state, float cur
     const float interpolated = 0.5f * (currentSample + state.previousSample);
     state.previousSample = currentSample;
     return juce::jmax (std::abs (currentSample), std::abs (interpolated));
+}
+
+void GLSMixGuardAudioProcessor::updateDelayCapacity()
+{
+    if (! delaySpecConfigured || delayCapacitySamples <= 0)
+        return;
+
+    for (auto& state : channelStates)
+        initialiseChannelState (state);
+}
+
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new GLSMixGuardAudioProcessor();
 }

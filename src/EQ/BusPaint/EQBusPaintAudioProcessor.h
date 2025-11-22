@@ -1,8 +1,11 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <array>
+#include "../../DualPrecisionAudioProcessor.h"
+#include "../../ui/GoodluckLookAndFeel.h"
 
-class EQBusPaintAudioProcessor : public juce::AudioProcessor
+class EQBusPaintAudioProcessor : public DualPrecisionAudioProcessor
 {
 public:
     EQBusPaintAudioProcessor();
@@ -21,10 +24,10 @@ public:
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override { return 0.0; }
 
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    int getNumPrograms() override;
+    int getCurrentProgram() override { return currentPreset; }
+    void setCurrentProgram (int) override;
+    const juce::String getProgramName (int index) override;
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -41,9 +44,19 @@ private:
     std::vector<juce::dsp::IIR::Filter<float>> warmthBells;
     double currentSampleRate = 44100.0;
     juce::uint32 lastBlockSize = 512;
+    int currentPreset = 0;
+
+    struct Preset
+    {
+        const char* name;
+        std::vector<std::pair<const char*, float>> params;
+    };
+
+    static const std::array<Preset, 3> presetBank;
 
     void ensureFilterState (int numChannels);
     void updateFilters (float lowTilt, float highTilt, float presence, float warmth);
+    void applyPreset (int index);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EQBusPaintAudioProcessor)
 };
@@ -60,16 +73,28 @@ public:
 private:
     EQBusPaintAudioProcessor& processorRef;
 
+    juce::Colour accentColour;
+    gls::ui::GoodluckLookAndFeel lookAndFeel;
+    gls::ui::GoodluckHeader headerComponent;
+    gls::ui::GoodluckFooter footerComponent;
+
     juce::Slider lowTiltSlider;
     juce::Slider highTiltSlider;
     juce::Slider presenceSlider;
     juce::Slider warmthSlider;
-    juce::Slider outputSlider;
+    juce::Slider inputTrimSlider;
+    juce::Slider outputTrimSlider;
+    juce::ToggleButton bypassButton { "Soft Bypass" };
 
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
+    using ButtonAttachment = juce::AudioProcessorValueTreeState::ButtonAttachment;
     std::vector<std::unique_ptr<SliderAttachment>> attachments;
+    std::vector<std::unique_ptr<ButtonAttachment>> buttonAttachments;
+    std::vector<std::unique_ptr<juce::Label>> labels;
 
-    void initSlider (juce::Slider& slider, const juce::String& label);
+    void initSlider (juce::Slider& slider, const juce::String& label, bool macro = false);
+    void initToggle (juce::ToggleButton& toggle);
+    void layoutLabels();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EQBusPaintAudioProcessorEditor)
 };

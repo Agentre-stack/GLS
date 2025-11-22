@@ -11,8 +11,8 @@ constexpr auto kParamMix           = "mix";
 
 //==============================================================================
 PITShimmerFallAudioProcessor::PITShimmerFallAudioProcessor()
-    : juce::AudioProcessor (BusesProperties().withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
-                                               .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
+    : DualPrecisionAudioProcessor (BusesProperties().withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
+                                                   .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "Parameters", createParameterLayout())
 {
 }
@@ -21,9 +21,17 @@ PITShimmerFallAudioProcessor::PITShimmerFallAudioProcessor()
 //==============================================================================
 void PITShimmerFallAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSpec = { sampleRate, static_cast<juce::uint32> (samplesPerBlock), static_cast<juce::uint32> (getTotalNumInputChannels()) };
+    const auto safeRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    const auto totalChannels = juce::jmax (2, getTotalNumInputChannels());
+    const auto blockSize = juce::jmax (1, samplesPerBlock);
+
+    currentSpec = { safeRate, static_cast<juce::uint32> (blockSize), static_cast<juce::uint32> (totalChannels) };
     reverb.prepare (currentSpec);
-    shimmerBuffer.setSize (getTotalNumInputChannels(), samplesPerBlock);
+    shimmerBuffer.setSize (totalChannels, blockSize);
+    wetBuffer.setSize (totalChannels, blockSize);
+    shimmerShifter.prepare (safeRate, totalChannels);
+    shimmerShifter.reset();
+    feedbackMemory.assign ((size_t) totalChannels, 0.0f);
     updateReverbParams();
 }
 
@@ -31,6 +39,8 @@ void PITShimmerFallAudioProcessor::releaseResources()
 {
     reverb.reset();
     shimmerBuffer.setSize (0, 0);
+    wetBuffer.setSize (0, 0);
+    feedbackMemory.clear();
 }
 
 bool PITShimmerFallAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -64,20 +74,43 @@ void PITShimmerFallAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
     const auto mix           = apvts.getRawParameterValue (kParamMix)->load();
 
     updateReverbParams();
-    juce::ignoreUnused (pitchInterval, feedback, damping, timeSeconds);
 
-    shimmerBuffer.makeCopyOf (buffer, true);
+    shimmerBuffer.setSize (buffer.getNumChannels(), juce::jmax (1, numSamples), false, false, true);
+    wetBuffer.setSize (buffer.getNumChannels(), juce::jmax (1, numSamples), false, false, true);
+    shimmerBuffer.makeCopyOf (buffer, true); // dry copy
+    wetBuffer.makeCopyOf (buffer, true);
 
-    // TODO: Implement shimmer flow:
-    // 1. Run input through base reverb.
-    // 2. Pitch shift the feedback path by `pitchInterval`.
-    // 3. Apply damping/time controls to reverb feedback network.
-    // 4. Mix processed signal with original using `mix`.
+    juce::dsp::AudioBlock<float> wetBlock (wetBuffer);
+    reverb.process (juce::dsp::ProcessContextReplacing<float> (wetBlock));
 
-    // Placeholder: pass dry signal through until DSP is implemented.
-    buffer.applyGain (mix);
+    const float pitchRatio = std::pow (2.0f, pitchInterval / 12.0f);
+    shimmerShifter.process (wetBuffer, pitchRatio);
+
+    if ((int) feedbackMemory.size() < buffer.getNumChannels())
+        feedbackMemory.assign ((size_t) buffer.getNumChannels(), 0.0f);
+
+    for (int ch = 0; ch < wetBuffer.getNumChannels(); ++ch)
+    {
+        auto* data = wetBuffer.getWritePointer (ch);
+        float& state = feedbackMemory[(size_t) ch];
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float fb = state * feedback * juce::jlimit (0.0f, 1.0f, damping);
+            const float shimmerSample = data[i] + fb;
+            state = juce::jlimit (-2.0f, 2.0f, shimmerSample);
+            data[i] = shimmerSample;
+        }
+    }
+
     for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-        buffer.addFrom (ch, 0, shimmerBuffer, ch, 0, numSamples, 1.0f - mix);
+    {
+        auto* dry = shimmerBuffer.getReadPointer (ch);
+        auto* wet = wetBuffer.getReadPointer (ch);
+        auto* out = buffer.getWritePointer (ch);
+        for (int i = 0; i < numSamples; ++i)
+            out[i] = wet[i] * mix + dry[i] * (1.0f - mix);
+    }
 }
 
 juce::AudioProcessorEditor* PITShimmerFallAudioProcessor::createEditor()

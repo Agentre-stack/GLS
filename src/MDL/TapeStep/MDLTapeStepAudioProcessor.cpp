@@ -1,7 +1,7 @@
 #include "MDLTapeStepAudioProcessor.h"
 
 MDLTapeStepAudioProcessor::MDLTapeStepAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "TAPE_STEP", createParameterLayout())
@@ -10,9 +10,11 @@ MDLTapeStepAudioProcessor::MDLTapeStepAudioProcessor()
 
 void MDLTapeStepAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = juce::jmax (sampleRate, 44100.0);
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
     lastBlockSize = (juce::uint32) juce::jmax (1, samplesPerBlock);
-    ensureStateSize (getTotalNumOutputChannels());
+    const auto channels = juce::jmax (1, getTotalNumOutputChannels());
+    dryBuffer.setSize (channels, (int) lastBlockSize);
+    ensureStateSize (channels);
 }
 
 void MDLTapeStepAudioProcessor::releaseResources()
@@ -46,6 +48,7 @@ void MDLTapeStepAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const int numChannels = buffer.getNumChannels();
     const int numSamples  = buffer.getNumSamples();
     ensureStateSize (numChannels);
+    dryBuffer.setSize (numChannels, numSamples, false, false, true);
     dryBuffer.makeCopyOf (buffer, true);
 
     updateToneFilters (tone);
@@ -191,31 +194,28 @@ void MDLTapeStepAudioProcessor::ensureStateSize (int numChannels)
         return;
 
     if ((int) tapeLines.size() < numChannels)
-    {
-        juce::dsp::ProcessSpec spec { currentSampleRate,
-                                      lastBlockSize > 0 ? lastBlockSize : 512u,
-                                      1 };
-        const auto previous = (int) tapeLines.size();
         tapeLines.resize (numChannels);
-        for (int ch = previous; ch < numChannels; ++ch)
-        {
-            tapeLines[ch].delay.setMaximumDelayInSamples ((int) (currentSampleRate * 3.0f));
-            tapeLines[ch].delay.prepare (spec);
-            tapeLines[ch].delay.reset();
-            tapeLines[ch].toneFilter.prepare (spec);
-            tapeLines[ch].toneFilter.reset();
-        }
-    }
-    else
+
+    const auto targetBlock = lastBlockSize > 0 ? lastBlockSize : 512u;
+    const bool specChanged = ! juce::approximatelyEqual (lineSpecSampleRate, currentSampleRate)
+                             || lineSpecBlockSize != targetBlock;
+
+    if (specChanged)
     {
         juce::dsp::ProcessSpec spec { currentSampleRate,
-                                      lastBlockSize > 0 ? lastBlockSize : 512u,
+                                      targetBlock,
                                       1 };
         for (auto& line : tapeLines)
         {
+            line.delay.setMaximumDelayInSamples ((int) (currentSampleRate * 3.0f));
             line.delay.prepare (spec);
+            line.delay.reset();
             line.toneFilter.prepare (spec);
+            line.toneFilter.reset();
         }
+
+        lineSpecSampleRate = currentSampleRate;
+        lineSpecBlockSize = targetBlock;
     }
 }
 
@@ -229,4 +229,9 @@ void MDLTapeStepAudioProcessor::updateToneFilters (float tone)
 
     for (auto& line : tapeLines)
         line.toneFilter.coefficients = coeffs;
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new MDLTapeStepAudioProcessor();
 }

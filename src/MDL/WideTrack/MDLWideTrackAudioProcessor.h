@@ -1,8 +1,9 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "../../DualPrecisionAudioProcessor.h"
 
-class MDLWideTrackAudioProcessor : public juce::AudioProcessor
+class MDLWideTrackAudioProcessor : public DualPrecisionAudioProcessor
 {
 public:
     MDLWideTrackAudioProcessor();
@@ -24,7 +25,7 @@ public:
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    const juce::String getProgramName (int index) override { return index == 0 ? juce::String (JucePlugin_Name " 01") : juce::String(); }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -39,9 +40,10 @@ private:
     juce::AudioBuffer<float> dryBuffer;
     juce::AudioBuffer<float> sumDiffBuffer;
     double currentSampleRate = 44100.0;
-    juce::Random random;
-
-    void applyMicroDelay (juce::AudioBuffer<float>& buffer, float spreadMs);
+    juce::uint32 lastBlockSize = 512;
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> sideDelay { 48000 };
+    double delaySpecSampleRate = 0.0;
+    juce::uint32 delaySpecBlockSize = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MDLWideTrackAudioProcessor)
 };
@@ -62,6 +64,7 @@ private:
     juce::Slider delaySpreadSlider;
     juce::Slider hfSlider;
     juce::Slider monoSlider;
+    juce::Slider outputTrimSlider;
 
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
     std::vector<std::unique_ptr<SliderAttachment>> attachments;

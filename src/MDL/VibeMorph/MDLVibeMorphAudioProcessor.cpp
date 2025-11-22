@@ -1,7 +1,7 @@
 #include "MDLVibeMorphAudioProcessor.h"
 
 MDLVibeMorphAudioProcessor::MDLVibeMorphAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "VIBE_MORPH", createParameterLayout())
@@ -10,9 +10,13 @@ MDLVibeMorphAudioProcessor::MDLVibeMorphAudioProcessor()
 
 void MDLVibeMorphAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = juce::jmax (sampleRate, 44100.0);
-    ensureStageState (getTotalNumOutputChannels(),
-                      4); // start with 4 stages
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    lastBlockSize = (juce::uint32) juce::jmax (1, samplesPerBlock);
+    const auto channels = juce::jmax (1, getTotalNumOutputChannels());
+    dryBuffer.setSize (channels, (int) lastBlockSize);
+    const int mode = (int) std::round (apvts.getRawParameterValue ("mode")->load());
+    ensureStageState (channels, mode == 0 ? 4 : 6);
+    lfoPhase.assign ((size_t) channels, 0.0f);
 }
 
 void MDLVibeMorphAudioProcessor::releaseResources()
@@ -40,7 +44,11 @@ void MDLVibeMorphAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const int numChannels = buffer.getNumChannels();
     const int numSamples  = buffer.getNumSamples();
 
+    lastBlockSize = (juce::uint32) juce::jmax (1, numSamples);
     ensureStageState (numChannels, mode == 0 ? 4 : 6);
+    if ((int) lfoPhase.size() < numChannels)
+        lfoPhase.resize ((size_t) numChannels, 0.0f);
+    dryBuffer.setSize (numChannels, numSamples, false, false, true);
     dryBuffer.makeCopyOf (buffer, true);
 
     updateStageCoefficients (rate, depth, throb, mode);
@@ -158,10 +166,6 @@ void MDLVibeMorphAudioProcessor::ensureStageState (int numChannels, int numStage
     if (numChannels <= 0 || numStages <= 0)
         return;
 
-    juce::dsp::ProcessSpec spec { currentSampleRate,
-                                  (juce::uint32) 512,
-                                  1 };
-
     if ((int) channelStages.size() < numChannels)
         channelStages.resize (numChannels);
 
@@ -171,12 +175,28 @@ void MDLVibeMorphAudioProcessor::ensureStageState (int numChannels, int numStage
         {
             const int previous = (int) stages.size();
             stages.resize (numStages);
-            for (int s = previous; s < numStages; ++s)
-            {
-                stages[s].filter.prepare (spec);
-                stages[s].filter.reset();
-            }
         }
+    }
+
+    const auto targetBlock = lastBlockSize > 0 ? lastBlockSize : 512u;
+    const bool specChanged = ! juce::approximatelyEqual (stageSpecSampleRate, currentSampleRate)
+                             || stageSpecBlockSize != targetBlock;
+
+    if (specChanged)
+    {
+        juce::dsp::ProcessSpec spec { currentSampleRate,
+                                      targetBlock,
+                                      1 };
+
+        for (auto& stages : channelStages)
+            for (auto& stage : stages)
+            {
+                stage.filter.prepare (spec);
+                stage.filter.reset();
+            }
+
+        stageSpecSampleRate = currentSampleRate;
+        stageSpecBlockSize  = targetBlock;
     }
 }
 
@@ -186,22 +206,30 @@ void MDLVibeMorphAudioProcessor::updateStageCoefficients (float rate, float dept
         return;
 
     const float baseFreq = mode == 0 ? 350.0f : 900.0f;
+    if ((int) lfoPhase.size() < (int) channelStages.size())
+        lfoPhase.resize (channelStages.size(), 0.0f);
+
     for (int ch = 0; ch < (int) channelStages.size(); ++ch)
     {
         auto& stages = channelStages[ch];
-        float lfo = lfoPhase[ch % lfoPhase.size()];
+        float& phase = lfoPhase[ch];
 
         for (int s = 0; s < (int) stages.size(); ++s)
         {
-            const float mod = std::sin (lfo + s * 0.3f) * depth;
+            const float mod = std::sin (phase + s * 0.3f) * depth;
             const float freq = juce::jlimit (20.0f, (float) (currentSampleRate * 0.45f), baseFreq + mod * baseFreq);
             auto coeffs = juce::dsp::IIR::Coefficients<float>::makeAllPass (currentSampleRate, freq,
                                                                             1.0f + throb * 0.5f);
             stages[s].filter.coefficients = coeffs;
         }
 
-        lfoPhase[ch % lfoPhase.size()] = lfo + rate / (float) currentSampleRate * juce::MathConstants<float>::twoPi;
-        if (lfoPhase[ch % lfoPhase.size()] > juce::MathConstants<float>::twoPi)
-            lfoPhase[ch % lfoPhase.size()] -= juce::MathConstants<float>::twoPi;
+        phase += rate / (float) currentSampleRate * juce::MathConstants<float>::twoPi;
+        if (phase > juce::MathConstants<float>::twoPi)
+            phase -= juce::MathConstants<float>::twoPi;
     }
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new MDLVibeMorphAudioProcessor();
 }

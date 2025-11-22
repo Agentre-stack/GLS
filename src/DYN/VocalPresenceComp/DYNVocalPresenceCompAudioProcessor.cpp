@@ -1,7 +1,7 @@
 #include "DYNVocalPresenceCompAudioProcessor.h"
 
 DYNVocalPresenceCompAudioProcessor::DYNVocalPresenceCompAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "VOCAL_PRESENCE_COMP", createParameterLayout())
@@ -96,7 +96,8 @@ void DYNVocalPresenceCompAudioProcessor::processBlock (juce::AudioBuffer<float>&
     juce::dsp::AudioBlock<float> block (buffer);
     for (int ch = 0; ch < numChannels; ++ch)
     {
-        auto context = juce::dsp::ProcessContextReplacing<float> (block.getSingleChannelBlock ((size_t) ch));
+        auto channelBlock = block.getSingleChannelBlock ((size_t) ch);
+        juce::dsp::ProcessContextReplacing<float> context (channelBlock);
         airFilters[ch].process (context);
     }
 }
@@ -274,4 +275,9 @@ float DYNVocalPresenceCompAudioProcessor::computePresenceGainDb (float levelDb, 
 
     const float excess = juce::jlimit (0.0f, 24.0f, levelDb - thresholdDb);
     return juce::jlimit (rangeDb, 0.0f, -(excess / 24.0f) * std::abs (rangeDb));
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new DYNVocalPresenceCompAudioProcessor();
 }

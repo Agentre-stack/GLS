@@ -1,8 +1,11 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <array>
+#include "../../DualPrecisionAudioProcessor.h"
+#include "../../ui/GoodluckLookAndFeel.h"
 
-class GRDTopFizzAudioProcessor : public juce::AudioProcessor
+class GRDTopFizzAudioProcessor : public DualPrecisionAudioProcessor
 {
 public:
     GRDTopFizzAudioProcessor();
@@ -21,10 +24,10 @@ public:
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override { return 0.0; }
 
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    int getNumPrograms() override;
+    int getCurrentProgram() override { return currentPreset; }
+    void setCurrentProgram (int) override;
+    const juce::String getProgramName (int index) override;
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -40,10 +43,20 @@ private:
     std::vector<juce::dsp::IIR::Filter<float>> smoothingFilters;
     juce::AudioBuffer<float> dryBuffer;
     juce::uint32 lastBlockSize = 0;
+    int currentPreset = 0;
+
+    struct Preset
+    {
+        const char* name;
+        std::vector<std::pair<const char*, float>> params;
+    };
+
+    static const std::array<Preset, 3> presetBank;
 
     void ensureStateSize (int numChannels, int numSamples);
     void updateFilters (float bandFreq, float smoothFreq);
     float generateHarmonics (float input, float amount, float blend) const;
+    void applyPreset (int index);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GRDTopFizzAudioProcessor)
 };
@@ -60,16 +73,28 @@ public:
 private:
     GRDTopFizzAudioProcessor& processorRef;
 
+    juce::Colour accentColour;
+    gls::ui::GoodluckLookAndFeel lookAndFeel;
+    gls::ui::GoodluckHeader headerComponent;
+    gls::ui::GoodluckFooter footerComponent;
+
     juce::Slider freqSlider;
     juce::Slider amountSlider;
     juce::Slider oddEvenSlider;
     juce::Slider deHarshSlider;
     juce::Slider mixSlider;
+    juce::Slider inputTrimSlider;
+    juce::Slider outputTrimSlider;
+    juce::ToggleButton bypassButton { "Soft Bypass" };
 
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
     std::vector<std::unique_ptr<SliderAttachment>> attachments;
+    std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>> buttonAttachments;
+    std::vector<std::unique_ptr<juce::Label>> labels;
 
-    void initSlider (juce::Slider& slider, const juce::String& label);
+    void initSlider (juce::Slider& slider, const juce::String& label, bool macro = false);
+    void initToggle (juce::ToggleButton& toggle);
+    void layoutLabels();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GRDTopFizzAudioProcessorEditor)
 };

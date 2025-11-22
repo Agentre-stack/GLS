@@ -9,6 +9,8 @@ juce_add_plugin(PITTimeStack
     PRODUCT_NAME "PIT Time Stack"
 )
 
+juce_generate_juce_header(PITTimeStack)
+
 target_sources(PITTimeStack PRIVATE
     PITTimeStackAudioProcessor.cpp
     PITTimeStackAudioProcessor.h

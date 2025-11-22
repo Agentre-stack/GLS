@@ -10,16 +10,23 @@ constexpr auto kParamMix           = "mix";
 } // namespace
 
 PITGrowlWarpAudioProcessor::PITGrowlWarpAudioProcessor()
-    : juce::AudioProcessor (BusesProperties().withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
-                                               .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
+    : DualPrecisionAudioProcessor (BusesProperties().withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
+                                                   .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "Parameters", createParameterLayout())
 {
 }
 
 void PITGrowlWarpAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = sampleRate;
-    dryBuffer.setSize (getTotalNumInputChannels(), samplesPerBlock);
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    const auto totalChannels = juce::jmax (2, getTotalNumInputChannels());
+    const auto blockSize = juce::jmax (1, samplesPerBlock);
+
+    dryBuffer.setSize (totalChannels, blockSize);
+    wetBuffer.setSize (totalChannels, blockSize);
+    pitchShifter.prepare (currentSampleRate, totalChannels);
+    pitchShifter.reset();
+    formantFilters.clear();
 }
 
 void PITGrowlWarpAudioProcessor::releaseResources()
@@ -50,7 +57,12 @@ void PITGrowlWarpAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     for (auto ch = numInputChannels; ch < numOutputChannels; ++ch)
         buffer.clear (ch, 0, numSamples);
 
+    const auto channelCount = juce::jmax (1, buffer.getNumChannels());
+    const auto samples = juce::jmax (1, numSamples);
+    dryBuffer.setSize (channelCount, samples, false, false, true);
+    wetBuffer.setSize (channelCount, samples, false, false, true);
     dryBuffer.makeCopyOf (buffer, true);
+    wetBuffer.makeCopyOf (buffer, true);
 
     const auto semitonesDown = apvts.getRawParameterValue (kParamSemitonesDown)->load();
     const auto growl         = apvts.getRawParameterValue (kParamGrowl)->load();
@@ -58,18 +70,49 @@ void PITGrowlWarpAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const auto drive         = apvts.getRawParameterValue (kParamDrive)->load();
     const auto mix           = apvts.getRawParameterValue (kParamMix)->load();
 
-    juce::ignoreUnused (semitonesDown, growl, formant, drive, currentSampleRate);
+    const float ratio = std::pow (2.0f, semitonesDown / 12.0f);
+    pitchShifter.process (wetBuffer, ratio);
 
-    // TODO: Implement full GrowlWarp path:
-    // 1. Pitch shift input downward by `semitonesDown`.
-    // 2. Apply formant filter to emphasize vocal-like contour.
-    // 3. Inject growl/grit harmonics based on `growl` parameter.
-    // 4. Apply additional drive/saturation stage.
-    // 5. Blend processed signal with dry using `mix`.
+    auto ensureFilters = [this, channels = buffer.getNumChannels()]()
+    {
+        if ((int) formantFilters.size() < channels)
+        {
+            formantFilters.resize ((size_t) channels);
+            for (auto& filter : formantFilters)
+                filter.reset();
+        }
+    };
+    ensureFilters();
 
-    buffer.applyGain (mix);
+    const float formantFreq = juce::jmap (formant, -12.0f, 12.0f, 200.0f, 3200.0f);
+    auto formantCoeffs = juce::dsp::IIR::Coefficients<float>::makeBandPass (currentSampleRate, formantFreq, 1.2f);
+    for (auto& filter : formantFilters)
+        filter.coefficients = formantCoeffs;
+
+    for (int ch = 0; ch < wetBuffer.getNumChannels(); ++ch)
+    {
+        auto* data = wetBuffer.getWritePointer (ch);
+        auto& formantFilter = formantFilters[(size_t) ch];
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            float sample = formantFilter.processSample (data[i]);
+            const float growlShape = juce::dsp::FastMathApproximations::tanh (sample * juce::jmap (growl, 0.0f, 1.0f, 1.0f, 4.0f));
+            sample = juce::jmap (growl, 0.0f, 1.0f, sample, growlShape);
+            const float driveGain = juce::jmap (drive, 0.0f, 1.0f, 1.0f, 6.0f);
+            sample = juce::dsp::FastMathApproximations::tanh (sample * driveGain);
+            data[i] = sample;
+        }
+    }
+
     for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-        buffer.addFrom (ch, 0, dryBuffer, ch, 0, numSamples, 1.0f - mix);
+    {
+        auto* dry = dryBuffer.getReadPointer (ch);
+        auto* wet = wetBuffer.getReadPointer (ch);
+        auto* out = buffer.getWritePointer (ch);
+        for (int i = 0; i < numSamples; ++i)
+            out[i] = wet[i] * mix + dry[i] * (1.0f - mix);
+    }
 }
 
 juce::AudioProcessorEditor* PITGrowlWarpAudioProcessor::createEditor()

@@ -1,8 +1,10 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "../../DualPrecisionAudioProcessor.h"
+#include "../common/SimplePitchShifter.h"
 
-class PITShiftPrimeAudioProcessor : public juce::AudioProcessor
+class PITShiftPrimeAudioProcessor : public DualPrecisionAudioProcessor
 {
 public:
     PITShiftPrimeAudioProcessor();
@@ -24,7 +26,10 @@ public:
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    const juce::String getProgramName (int index) override
+    {
+        return index == 0 ? juce::String ("PIT Shift Prime 01") : juce::String();
+    }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -42,6 +47,8 @@ private:
     std::vector<juce::dsp::IIR::Filter<float>> formantFilters;
 
     juce::AudioBuffer<float> dryBuffer;
+    juce::AudioBuffer<float> wetBuffer;
+    pit::SimplePitchShifter pitchShifter;
 
     void ensureStateSize (int numChannels, int numSamples);
     void updateFilters (float hpf, float lpf, float formant);

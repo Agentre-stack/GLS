@@ -1,8 +1,10 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "../../DualPrecisionAudioProcessor.h"
+#include "../common/SimplePitchShifter.h"
 
-class PITGrowlWarpAudioProcessor : public juce::AudioProcessor
+class PITGrowlWarpAudioProcessor : public DualPrecisionAudioProcessor
 {
 public:
     PITGrowlWarpAudioProcessor();
@@ -25,7 +27,10 @@ public:
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    const juce::String getProgramName (int index) override
+    {
+        return index == 0 ? juce::String ("PIT Growl Warp 01") : juce::String();
+    }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -38,6 +43,9 @@ private:
     juce::AudioProcessorValueTreeState apvts;
 
     juce::AudioBuffer<float> dryBuffer;
+    juce::AudioBuffer<float> wetBuffer;
+    pit::SimplePitchShifter pitchShifter;
+    std::vector<juce::dsp::IIR::Filter<float>> formantFilters;
     double currentSampleRate = 44100.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PITGrowlWarpAudioProcessor)

@@ -1,7 +1,7 @@
 #include "MDLChorusIXAudioProcessor.h"
 
 MDLChorusIXAudioProcessor::MDLChorusIXAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "CHORUS_IX", createParameterLayout())
@@ -10,9 +10,12 @@ MDLChorusIXAudioProcessor::MDLChorusIXAudioProcessor()
 
 void MDLChorusIXAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = juce::jmax (sampleRate, 44100.0);
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
     lastBlockSize = (juce::uint32) juce::jmax (1, samplesPerBlock);
-    ensureVoiceState (getTotalNumOutputChannels(),
+    const auto channels = juce::jmax (1, getTotalNumOutputChannels());
+    dryBuffer.setSize (channels, (int) lastBlockSize);
+
+    ensureVoiceState (channels,
                       (int) std::round (apvts.getRawParameterValue ("voices")->load()));
 }
 
@@ -43,6 +46,7 @@ void MDLChorusIXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const int numSamples  = buffer.getNumSamples();
 
     ensureVoiceState (numChannels, voices);
+    dryBuffer.setSize (numChannels, numSamples, false, false, true);
     dryBuffer.makeCopyOf (buffer, true);
     updateToneFilter (tone);
 
@@ -177,27 +181,45 @@ void MDLChorusIXAudioProcessor::ensureVoiceState (int numChannels, int numVoices
     if (numChannels <= 0 || numVoices <= 0)
         return;
 
-    juce::dsp::ProcessSpec spec { currentSampleRate,
-                                  lastBlockSize > 0 ? lastBlockSize : 512u,
-                                  1 };
-
     if ((int) channelVoices.size() < numChannels)
         channelVoices.resize (numChannels);
 
+    const auto targetBlockSize = lastBlockSize > 0 ? lastBlockSize : 512u;
+    const bool specChanged = ! juce::approximatelyEqual (voiceSpecSampleRate, currentSampleRate)
+                             || voiceSpecBlockSize != targetBlockSize;
+
     for (auto& voiceArray : channelVoices)
     {
-        if ((int) voiceArray.size() < numVoices)
+        const auto previous = (int) voiceArray.size();
+        if (previous != numVoices)
         {
-            const auto previous = (int) voiceArray.size();
             voiceArray.resize (numVoices);
-            for (int v = previous; v < numVoices; ++v)
+            if (numVoices > previous)
             {
-                voiceArray[v].delay.setMaximumDelayInSamples ((int) (currentSampleRate * 0.05f));
-                voiceArray[v].delay.prepare (spec);
-                voiceArray[v].delay.reset();
-                voiceArray[v].phase = juce::Random::getSystemRandom().nextFloat() * juce::MathConstants<float>::twoPi;
+                for (int v = previous; v < numVoices; ++v)
+                    voiceArray[v].phase = juce::Random::getSystemRandom().nextFloat() * juce::MathConstants<float>::twoPi;
             }
         }
+
+        if (specChanged || numVoices != previous)
+        {
+            juce::dsp::ProcessSpec spec { currentSampleRate,
+                                          targetBlockSize,
+                                          1 };
+
+            for (auto& voice : voiceArray)
+            {
+                voice.delay.setMaximumDelayInSamples ((int) (currentSampleRate * 0.05f));
+                voice.delay.prepare (spec);
+                voice.delay.reset();
+            }
+        }
+    }
+
+    if (specChanged)
+    {
+        voiceSpecSampleRate = currentSampleRate;
+        voiceSpecBlockSize = targetBlockSize;
     }
 }
 
@@ -215,4 +237,14 @@ void MDLChorusIXAudioProcessor::updateToneFilter (float tone)
         filter.coefficients = coeffs;
         filter.reset();
     }
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new MDLChorusIXAudioProcessor();
+}
+
+juce::AudioProcessorEditor* MDLChorusIXAudioProcessor::createEditor()
+{
+    return new MDLChorusIXAudioProcessorEditor (*this);
 }

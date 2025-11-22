@@ -1,7 +1,31 @@
 #include "EQTiltLineAudioProcessor.h"
 
+const std::array<EQTiltLineAudioProcessor::Preset, 3> EQTiltLineAudioProcessor::presetBank {{
+    { "Bright Vocal", {
+        { "tilt",        4.0f },
+        { "pivot_freq", 1800.0f },
+        { "low_shelf", -1.0f },
+        { "high_shelf", 1.5f },
+        { "output_trim", -0.3f }
+    }},
+    { "Warm Bus", {
+        { "tilt",       -2.0f },
+        { "pivot_freq", 900.0f },
+        { "low_shelf",  1.0f },
+        { "high_shelf", -0.5f },
+        { "output_trim", 0.0f }
+    }},
+    { "Air Lift", {
+        { "tilt",        3.0f },
+        { "pivot_freq", 2500.0f },
+        { "low_shelf",  0.0f },
+        { "high_shelf", 2.0f },
+        { "output_trim", -0.5f }
+    }}
+}};
+
 EQTiltLineAudioProcessor::EQTiltLineAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "EQ_TILT_LINE", createParameterLayout())
@@ -161,6 +185,44 @@ juce::AudioProcessorEditor* EQTiltLineAudioProcessor::createEditor()
     return new EQTiltLineAudioProcessorEditor (*this);
 }
 
+int EQTiltLineAudioProcessor::getNumPrograms()
+{
+    return (int) presetBank.size();
+}
+
+const juce::String EQTiltLineAudioProcessor::getProgramName (int index)
+{
+    if (juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return presetBank[(size_t) index].name;
+    return {};
+}
+
+void EQTiltLineAudioProcessor::setCurrentProgram (int index)
+{
+    const int clamped = juce::jlimit (0, (int) presetBank.size() - 1, index);
+    if (clamped == currentPreset)
+        return;
+
+    currentPreset = clamped;
+    applyPreset (clamped);
+}
+
+void EQTiltLineAudioProcessor::applyPreset (int index)
+{
+    if (! juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return;
+
+    const auto& preset = presetBank[(size_t) index];
+    for (const auto& entry : preset.params)
+    {
+        if (auto* param = apvts.getParameter (entry.first))
+        {
+            auto norm = param->getNormalisableRange().convertTo0to1 (entry.second);
+            param->setValueNotifyingHost (norm);
+        }
+    }
+}
+
 void EQTiltLineAudioProcessor::ensureFilterState (int numChannels)
 {
     if (numChannels <= 0)
@@ -200,4 +262,9 @@ void EQTiltLineAudioProcessor::updateShelves (float pivotFreq, float lowGainDb, 
         filter.coefficients = lowCoeffs;
     for (auto& filter : highShelves)
         filter.coefficients = highCoeffs;
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new EQTiltLineAudioProcessor();
 }

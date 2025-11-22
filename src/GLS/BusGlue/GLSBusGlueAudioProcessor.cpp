@@ -1,17 +1,79 @@
 #include "GLSBusGlueAudioProcessor.h"
 
+namespace
+{
+float normaliseLog (float value, float minHz, float maxHz)
+{
+    auto clamped = juce::jlimit (minHz, maxHz, value);
+    const auto logMin = std::log10 (minHz);
+    const auto logMax = std::log10 (maxHz);
+    const auto logVal = std::log10 (clamped);
+    return juce::jlimit (0.0f, 1.0f, (float) ((logVal - logMin) / (logMax - logMin)));
+}
+} // namespace
+
+const std::array<GLSBusGlueAudioProcessor::Preset, 3> GLSBusGlueAudioProcessor::presetBank {{
+    { "Drum Glue", {
+        { "thresh",     -18.0f },
+        { "ratio",        4.0f },
+        { "attack",      10.0f },
+        { "release",    120.0f },
+        { "knee",         6.0f },
+        { "sc_hpf",      80.0f },
+        { "input_trim",   0.0f },
+        { "mix",          0.75f },
+        { "output",       0.0f },
+        { "ui_bypass",    0.0f }
+    }},
+    { "MixBus Glue", {
+        { "thresh",     -12.0f },
+        { "ratio",        2.0f },
+        { "attack",      30.0f },
+        { "release",    200.0f },
+        { "knee",         4.0f },
+        { "sc_hpf",      60.0f },
+        { "input_trim",  -1.0f },
+        { "mix",          0.65f },
+        { "output",       0.0f },
+        { "ui_bypass",    0.0f }
+    }},
+    { "Vocal Bus", {
+        { "thresh",     -20.0f },
+        { "ratio",        3.0f },
+        { "attack",      12.0f },
+        { "release",    180.0f },
+        { "knee",         8.0f },
+        { "sc_hpf",     120.0f },
+        { "input_trim",   0.0f },
+        { "mix",          0.8f },
+        { "output",       0.0f },
+        { "ui_bypass",    0.0f }
+    }}
+}};
+
 GLSBusGlueAudioProcessor::GLSBusGlueAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "BUS_GLUE", createParameterLayout())
 {
 }
 
-void GLSBusGlueAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerBlock*/)
+void GLSBusGlueAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = juce::jmax (sampleRate, 44100.0);
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    lastBlockSize = (juce::uint32) juce::jmax (1, samplesPerBlock);
+
+    juce::dsp::ProcessSpec spec {
+        currentSampleRate,
+        lastBlockSize,
+        1
+    };
+
+    sidechainFilter.prepare (spec);
     sidechainFilter.reset();
+    detectorEnvelope = 0.0f;
+    gainSmoothed = 1.0f;
 }
 
 void GLSBusGlueAudioProcessor::releaseResources()
@@ -29,7 +91,11 @@ void GLSBusGlueAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     for (int ch = totalIn; ch < totalOut; ++ch)
         buffer.clear (ch, 0, buffer.getNumSamples());
 
-    auto readParam = [this](auto id) { return apvts.getRawParameterValue (id)->load(); };
+    auto readParam = [this](const char* id) { return apvts.getRawParameterValue (id)->load(); };
+
+    const auto bypassed  = apvts.getRawParameterValue ("ui_bypass")->load() > 0.5f;
+    if (bypassed)
+        return;
 
     const auto threshDb   = readParam ("thresh");
     const auto ratio      = juce::jmax (1.0f, readParam ("ratio"));
@@ -38,8 +104,11 @@ void GLSBusGlueAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const auto kneeDb     = juce::jmax (0.0f, readParam ("knee"));
     const auto scHpf      = readParam ("sc_hpf");
     const auto mix        = juce::jlimit (0.0f, 1.0f, readParam ("mix"));
+    const auto inputTrim  = juce::Decibels::decibelsToGain (readParam ("input_trim"));
     const auto outputTrim = juce::Decibels::decibelsToGain (readParam ("output"));
 
+    lastBlockSize = (juce::uint32) juce::jmax (1, buffer.getNumSamples());
+    buffer.applyGain (inputTrim);
     dryBuffer.makeCopyOf (buffer, true);
     updateSidechainFilter (scHpf);
 
@@ -68,6 +137,8 @@ void GLSBusGlueAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         const auto gainDb  = computeGainDb (levelDb, threshDb, ratio, kneeDb);
         const auto targetGain = juce::Decibels::decibelsToGain (gainDb);
         gainSmoothed += 0.05f * (targetGain - gainSmoothed);
+        lastReductionDb.store (juce::jlimit (-48.0f, 0.0f, juce::Decibels::gainToDecibels (gainSmoothed)),
+                               std::memory_order_relaxed);
 
         for (int ch = 0; ch < numChannels; ++ch)
         {
@@ -85,17 +156,16 @@ void GLSBusGlueAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     }
 
     if (outputTrim != 1.0f)
-    {
-        for (int ch = 0; ch < numChannels; ++ch)
-            buffer.applyGain (ch, 0, numSamples, outputTrim);
-    }
+        buffer.applyGain (outputTrim);
 }
 
 void GLSBusGlueAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    auto state = apvts.copyState();
+    if (auto state = apvts.copyState(); state.isValid())
+    {
         juce::MemoryOutputStream stream (destData, false);
         state.writeToStream (stream);
+    }
 }
 
 void GLSBusGlueAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
@@ -119,76 +189,243 @@ GLSBusGlueAudioProcessor::createParameterLayout()
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("release", "Release", releaseRange, 100.0f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("knee",    "Knee", juce::NormalisableRange<float> (0.0f, 18.0f, 0.1f), 3.0f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("sc_hpf",  "SC HPF", juce::NormalisableRange<float> (20.0f, 400.0f, 0.01f, 0.35f), 60.0f));
+    params.push_back (std::make_unique<juce::AudioParameterFloat> ("input_trim", "Input Trim",
+                                                                   juce::NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("mix",     "Mix", juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 1.0f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("output",  "Output", juce::NormalisableRange<float> (-18.0f, 18.0f, 0.1f), 0.0f));
+    params.push_back (std::make_unique<juce::AudioParameterBool>  ("ui_bypass", "Soft Bypass", false));
 
     return { params.begin(), params.end() };
 }
 
-GLSBusGlueAudioProcessorEditor::GLSBusGlueAudioProcessorEditor (GLSBusGlueAudioProcessor& p)
-    : juce::AudioProcessorEditor (&p), processorRef (p)
+class BusGlueVisual : public juce::Component, private juce::Timer
 {
-    auto makeSlider = [this](juce::Slider& slider, const juce::String& name)
+public:
+    BusGlueVisual (GLSBusGlueAudioProcessor& proc, juce::AudioProcessorValueTreeState& stateRef, juce::Colour accentColour)
+        : processor (proc), state (stateRef), accent (accentColour)
     {
-        initialiseSlider (slider, name);
-    };
+        thresh  = state.getRawParameterValue ("thresh");
+        ratio   = state.getRawParameterValue ("ratio");
+        attack  = state.getRawParameterValue ("attack");
+        release = state.getRawParameterValue ("release");
+        startTimerHz (30);
+    }
 
-    makeSlider (threshSlider,  "Thresh");
-    makeSlider (ratioSlider,   "Ratio");
-    makeSlider (attackSlider,  "Attack");
-    makeSlider (releaseSlider, "Release");
-    makeSlider (kneeSlider,    "Knee");
-    makeSlider (scHpfSlider,   "SC HPF");
-    makeSlider (mixSlider,     "Mix");
-    makeSlider (outputSlider,  "Output");
+    void paint (juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds().toFloat().reduced (4.0f);
+        g.setColour (gls::ui::Colours::panel());
+        g.fillRoundedRectangle (bounds, 10.0f);
+        g.setColour (gls::ui::Colours::outline());
+        g.drawRoundedRectangle (bounds, 10.0f, 1.5f);
+
+        auto meter = bounds.removeFromRight (52.0f).reduced (10.0f);
+        g.setColour (gls::ui::Colours::grid());
+        g.drawRoundedRectangle (meter, 6.0f, 1.2f);
+
+        const auto reductionDb = juce::jlimit (-30.0f, 0.0f, processor.getLastGainReductionDb());
+        const float reductionNorm = juce::jlimit (0.0f, 1.0f, -reductionDb / 30.0f);
+        auto fill = meter.withHeight (meter.getHeight() * reductionNorm).withY (meter.getBottom() - meter.getHeight() * reductionNorm);
+        g.setColour (accent.withAlpha (0.9f));
+        g.fillRoundedRectangle (fill, 6.0f);
+
+        g.setColour (gls::ui::Colours::textSecondary());
+        g.setFont (gls::ui::makeFont (11.0f));
+        g.drawFittedText (juce::String (juce::roundToInt (reductionDb)) + juce::String (" dB"),
+                          meter.toNearestInt().translated (0, -18), juce::Justification::centred, 1);
+
+        auto textArea = bounds.reduced (16.0f);
+        g.setColour (gls::ui::Colours::text());
+        g.setFont (gls::ui::makeFont (12.0f));
+        auto info = juce::String ("Thresh ")
+                      + juce::String (thresh != nullptr ? thresh->load() : -18.0f, 1) + " dB\n";
+        info += "Ratio " + juce::String (ratio != nullptr ? ratio->load() : 4.0f, 2) + ":1\n";
+        info += "Atk " + juce::String (attack != nullptr ? attack->load() : 10.0f, 1) + " ms  /  Rel "
+                + juce::String (release != nullptr ? release->load() : 100.0f, 1) + " ms";
+        g.drawFittedText (info, textArea.toNearestInt(), juce::Justification::centredLeft, 3);
+    }
+
+    void timerCallback() override { repaint(); }
+
+private:
+    GLSBusGlueAudioProcessor& processor;
+    juce::AudioProcessorValueTreeState& state;
+    juce::Colour accent;
+    std::atomic<float>* thresh = nullptr;
+    std::atomic<float>* ratio = nullptr;
+    std::atomic<float>* attack = nullptr;
+    std::atomic<float>* release = nullptr;
+};
+
+GLSBusGlueAudioProcessorEditor::GLSBusGlueAudioProcessorEditor (GLSBusGlueAudioProcessor& p)
+    : juce::AudioProcessorEditor (&p), processorRef (p),
+      accentColour (gls::ui::accentForFamily ("GLS")),
+      headerComponent ("GLS.BusGlue", "Bus Glue")
+{
+    lookAndFeel.setAccentColour (accentColour);
+    headerComponent.setAccentColour (accentColour);
+    footerComponent.setAccentColour (accentColour);
+    setLookAndFeel (&lookAndFeel);
+
+    addAndMakeVisible (headerComponent);
+    addAndMakeVisible (footerComponent);
+
+    centerVisual = std::make_unique<BusGlueVisual> (processorRef, processorRef.getValueTreeState(), accentColour);
+    addAndMakeVisible (*centerVisual);
+
+    configureSlider (threshSlider, "Threshold", true);
+    configureSlider (ratioSlider,  "Ratio", true);
+    configureSlider (attackSlider, "Attack", true);
+    configureSlider (releaseSlider,"Release", true);
+    configureSlider (kneeSlider,   "Knee", false);
+    configureSlider (scHpfSlider,  "SC HPF", false);
+    configureSlider (inputTrimSlider, "Input", false, true);
+    configureSlider (dryWetSlider,    "Dry / Wet", false, true);
+    configureSlider (outputTrimSlider,"Output", false, true);
+    configureToggle (bypassButton);
 
     auto& state = processorRef.getValueTreeState();
-    const juce::StringArray ids { "thresh", "ratio", "attack", "release", "knee", "sc_hpf", "mix", "output" };
-    juce::Slider* sliders[] = { &threshSlider, &ratioSlider, &attackSlider, &releaseSlider,
-                                &kneeSlider, &scHpfSlider, &mixSlider, &outputSlider };
+    auto attachSlider = [this, &state](const char* paramId, juce::Slider& slider)
+    {
+        sliderAttachments.push_back (std::make_unique<SliderAttachment> (state, paramId, slider));
+    };
 
-    for (int i = 0; i < ids.size(); ++i)
-        attachments.push_back (std::make_unique<SliderAttachment> (state, ids[i], *sliders[i]));
+    attachSlider ("thresh", threshSlider);
+    attachSlider ("ratio", ratioSlider);
+    attachSlider ("attack", attackSlider);
+    attachSlider ("release", releaseSlider);
+    attachSlider ("knee", kneeSlider);
+    attachSlider ("sc_hpf", scHpfSlider);
+    attachSlider ("input_trim", inputTrimSlider);
+    attachSlider ("mix", dryWetSlider);
+    attachSlider ("output", outputTrimSlider);
 
-    setSize (640, 300);
+    buttonAttachments.push_back (std::make_unique<ButtonAttachment> (state, "ui_bypass", bypassButton));
+
+    setSize (960, 540);
 }
 
-void GLSBusGlueAudioProcessorEditor::initialiseSlider (juce::Slider& slider, const juce::String& name)
+GLSBusGlueAudioProcessorEditor::~GLSBusGlueAudioProcessorEditor()
 {
-    slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 70, 18);
-    slider.setName (name);
+    bypassButton.setLookAndFeel (nullptr);
+    setLookAndFeel (nullptr);
+}
+
+void GLSBusGlueAudioProcessorEditor::configureSlider (juce::Slider& slider, const juce::String& name,
+                                                      bool isMacro, bool isLinear)
+{
+    slider.setLookAndFeel (&lookAndFeel);
+    slider.setSliderStyle (isLinear ? juce::Slider::LinearHorizontal
+                                    : juce::Slider::RotaryHorizontalVerticalDrag);
+    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, isMacro ? 70 : 64, 20);
+    slider.setColour (juce::Slider::rotarySliderFillColourId, accentColour);
+    slider.setColour (juce::Slider::thumbColourId, accentColour);
+    slider.setColour (juce::Slider::trackColourId, accentColour);
     addAndMakeVisible (slider);
+
+    auto label = std::make_unique<juce::Label>();
+    label->setText (name, juce::dontSendNotification);
+    label->setJustificationType (juce::Justification::centred);
+    label->setColour (juce::Label::textColourId, gls::ui::Colours::text());
+    label->setFont (gls::ui::makeFont (12.0f));
+    addAndMakeVisible (*label);
+    labeledSliders.push_back ({ &slider, label.get() });
+    sliderLabels.push_back (std::move (label));
+}
+
+void GLSBusGlueAudioProcessorEditor::configureToggle (juce::ToggleButton& toggle)
+{
+    toggle.setLookAndFeel (&lookAndFeel);
+    toggle.setClickingTogglesState (true);
+    addAndMakeVisible (toggle);
+}
+
+void GLSBusGlueAudioProcessorEditor::layoutLabels()
+{
+    for (auto& entry : labeledSliders)
+    {
+        if (entry.slider == nullptr || entry.label == nullptr)
+            continue;
+
+        auto sliderBounds = entry.slider->getBounds();
+        auto labelBounds = sliderBounds.withHeight (18).translated (0, -20);
+        entry.label->setBounds (labelBounds);
+    }
 }
 
 void GLSBusGlueAudioProcessorEditor::paint (juce::Graphics& g)
 {
-    g.fillAll (juce::Colours::darkslategrey);
-    g.setColour (juce::Colours::white);
-    g.setFont (16.0f);
-    g.drawFittedText ("GLS Bus Glue", getLocalBounds().removeFromTop (24), juce::Justification::centred, 1);
+    g.fillAll (gls::ui::Colours::background());
+    auto body = getLocalBounds();
+    body.removeFromTop (64);
+    body.removeFromBottom (64);
+    g.setColour (gls::ui::Colours::panel().darker (0.3f));
+    g.fillRoundedRectangle (body.toFloat().reduced (8.0f), 8.0f);
 }
 
 void GLSBusGlueAudioProcessorEditor::resized()
 {
-    auto area = getLocalBounds().reduced (8);
-    auto row = area.removeFromTop (area.getHeight() / 2);
+    auto bounds = getLocalBounds();
+    auto headerBounds = bounds.removeFromTop (64);
+    auto footerBounds = bounds.removeFromBottom (64);
+    headerComponent.setBounds (headerBounds);
+    footerComponent.setBounds (footerBounds);
 
-    auto layoutRow = [](juce::Rectangle<int> bounds, std::initializer_list<juce::Component*> comps)
-    {
-        auto width = bounds.getWidth() / static_cast<int> (comps.size());
-        for (auto* comp : comps)
-            comp->setBounds (bounds.removeFromLeft (width).reduced (8));
-    };
+    auto body = bounds;
+    auto left = body.removeFromLeft (juce::roundToInt (body.getWidth() * 0.33f)).reduced (12);
+    auto right = body.removeFromRight (juce::roundToInt (body.getWidth() * 0.26f)).reduced (12);
+    auto centre = body.reduced (12);
 
-    layoutRow (row, { &threshSlider, &ratioSlider, &attackSlider, &releaseSlider });
-    layoutRow (area, { &kneeSlider, &scHpfSlider, &mixSlider, &outputSlider });
+    if (centerVisual != nullptr)
+        centerVisual->setBounds (centre);
+
+    auto macroHeight = left.getHeight() / 4;
+    threshSlider.setBounds (left.removeFromTop (macroHeight).reduced (8));
+    ratioSlider .setBounds (left.removeFromTop (macroHeight).reduced (8));
+    attackSlider.setBounds (left.removeFromTop (macroHeight).reduced (8));
+    releaseSlider.setBounds (left.removeFromTop (macroHeight).reduced (8));
+
+    auto rightHeight = right.getHeight() / 2;
+    kneeSlider.setBounds (right.removeFromTop (rightHeight).reduced (8));
+    scHpfSlider.setBounds (right.removeFromTop (rightHeight).reduced (8));
+
+    auto footerArea = footerBounds.reduced (32, 8);
+    auto slotWidth = footerArea.getWidth() / 4;
+    inputTrimSlider .setBounds (footerArea.removeFromLeft (slotWidth).reduced (8));
+    dryWetSlider    .setBounds (footerArea.removeFromLeft (slotWidth).reduced (8));
+    outputTrimSlider.setBounds (footerArea.removeFromLeft (slotWidth).reduced (8));
+    bypassButton    .setBounds (footerArea.removeFromLeft (slotWidth).reduced (8));
+
+    layoutLabels();
 }
 
 juce::AudioProcessorEditor* GLSBusGlueAudioProcessor::createEditor()
 {
     return new GLSBusGlueAudioProcessorEditor (*this);
 }
+
+int GLSBusGlueAudioProcessor::getNumPrograms()
+{
+    return (int) presetBank.size();
+}
+
+const juce::String GLSBusGlueAudioProcessor::getProgramName (int index)
+{
+    if (juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return presetBank[(size_t) index].name;
+    return {};
+}
+
+void GLSBusGlueAudioProcessor::setCurrentProgram (int index)
+{
+    const int clamped = juce::jlimit (0, (int) presetBank.size() - 1, index);
+    if (clamped == currentPreset)
+        return;
+
+    currentPreset = clamped;
+    applyPreset (clamped);
+}
+
 
 void GLSBusGlueAudioProcessor::updateSidechainFilter (float frequency)
 {
@@ -222,4 +459,25 @@ float GLSBusGlueAudioProcessor::computeGainDb (float inputLevelDb, float thresho
         return 0.0f;
 
     return (thresholdDb - inputLevelDb) * (1.0f - slope);
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new GLSBusGlueAudioProcessor();
+}
+
+void GLSBusGlueAudioProcessor::applyPreset (int index)
+{
+    if (! juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return;
+
+    const auto& preset = presetBank[(size_t) index];
+    for (const auto& entry : preset.params)
+    {
+        if (auto* param = apvts.getParameter (entry.first))
+        {
+            auto norm = param->getNormalisableRange().convertTo0to1 (entry.second);
+            param->setValueNotifyingHost (norm);
+        }
+    }
 }

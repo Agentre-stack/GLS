@@ -1,7 +1,7 @@
 #include "MDLGhostEchoAudioProcessor.h"
 
 MDLGhostEchoAudioProcessor::MDLGhostEchoAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor(BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "GHOST_ECHO", createParameterLayout())
@@ -10,9 +10,11 @@ MDLGhostEchoAudioProcessor::MDLGhostEchoAudioProcessor()
 
 void MDLGhostEchoAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = juce::jmax (sampleRate, 44100.0);
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
     lastBlockSize = (juce::uint32) juce::jmax (1, samplesPerBlock);
-    ensureStateSize (getTotalNumOutputChannels());
+    const auto channels = juce::jmax (1, getTotalNumOutputChannels());
+    dryBuffer.setSize (channels, (int) lastBlockSize);
+    ensureStateSize (channels);
 }
 
 void MDLGhostEchoAudioProcessor::releaseResources()
@@ -43,6 +45,7 @@ void MDLGhostEchoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     lastBlockSize = (juce::uint32) juce::jmax (1, numSamples);
     ensureStateSize (numChannels);
+    dryBuffer.setSize (numChannels, numSamples, false, false, true);
     dryBuffer.makeCopyOf (buffer, true);
 
     setTapDelayTimes (timeMs);
@@ -60,7 +63,7 @@ void MDLGhostEchoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         {
             const float drySample = dry[i];
             float delayed = tap.delay.popSample (0);
-            delayed = tap.dampingFilter.processSample (0, delayed);
+            delayed = tap.dampingFilter.processSample (delayed);
 
             const float blurNoise = (random.nextFloat() * 2.0f - 1.0f) * blur * 0.02f;
             delayed = juce::jlimit (-1.0f, 1.0f, delayed + blurNoise);
@@ -181,27 +184,34 @@ void MDLGhostEchoAudioProcessor::ensureStateSize (int numChannels)
     if (numChannels <= 0)
         return;
 
-    juce::dsp::ProcessSpec spec { currentSampleRate,
-                                  lastBlockSize > 0 ? lastBlockSize : 512u,
-                                  1 };
     if ((int) taps.size() < numChannels)
     {
         const auto previous = (int) taps.size();
         taps.resize (numChannels);
         for (int ch = previous; ch < numChannels; ++ch)
-        {
-            taps[ch].delay.setMaximumDelayInSamples ((int) (currentSampleRate * 4.5f));
-            taps[ch].delay.prepare (spec);
-            taps[ch].delay.reset();
-            taps[ch].dampingFilter.prepare (spec);
-            taps[ch].dampingFilter.reset();
-        }
+            taps[ch].feedback = 0.4f;
     }
 
-    for (auto& tap : taps)
+    const auto targetBlockSize = lastBlockSize > 0 ? lastBlockSize : 512u;
+    const bool specChanged = ! juce::approximatelyEqual (tapSpecSampleRate, currentSampleRate)
+                             || tapSpecBlockSize != targetBlockSize;
+
+    if (specChanged)
     {
-        tap.delay.prepare (spec);
-        tap.dampingFilter.prepare (spec);
+        juce::dsp::ProcessSpec spec { currentSampleRate,
+                                      targetBlockSize,
+                                      1 };
+        for (auto& tap : taps)
+        {
+            tap.delay.setMaximumDelayInSamples ((int) (currentSampleRate * 4.5f));
+            tap.delay.prepare (spec);
+            tap.delay.reset();
+            tap.dampingFilter.prepare (spec);
+            tap.dampingFilter.reset();
+        }
+
+        tapSpecSampleRate = currentSampleRate;
+        tapSpecBlockSize  = targetBlockSize;
     }
 }
 
@@ -230,4 +240,10 @@ void MDLGhostEchoAudioProcessor::updateTapFilters (float damping)
                                                                     0.7f);
     for (auto& tap : taps)
         tap.dampingFilter.coefficients = coeffs;
+}
+
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new MDLGhostEchoAudioProcessor();
 }

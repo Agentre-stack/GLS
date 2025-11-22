@@ -1,10 +1,57 @@
 #include "DYNVocalPinAudioProcessor.h"
 
+namespace
+{
+constexpr auto kStateId     = "VOCAL_PIN";
+constexpr auto kParamBypass = "ui_bypass";
+constexpr auto kParamInput  = "input_trim";
+constexpr auto kParamOutput = "output_trim";
+}
+
+const std::array<DYNVocalPinAudioProcessor::Preset, 3> DYNVocalPinAudioProcessor::presetBank {{
+    { "Vocal Level", {
+        { "thresh",     -18.0f },
+        { "ratio",        3.5f },
+        { "attack",       6.0f },
+        { "release",    120.0f },
+        { "deess_freq", 6500.0f },
+        { "deess_amount", 0.4f },
+        { "mix",          0.9f },
+        { kParamInput,    0.0f },
+        { kParamOutput,   0.5f },
+        { kParamBypass,   0.0f }
+    }},
+    { "Air Tame", {
+        { "thresh",     -16.0f },
+        { "ratio",        2.8f },
+        { "attack",       8.0f },
+        { "release",    200.0f },
+        { "deess_freq", 7200.0f },
+        { "deess_amount", 0.6f },
+        { "mix",          0.85f },
+        { kParamInput,    0.0f },
+        { kParamOutput,   0.0f },
+        { kParamBypass,   0.0f }
+    }},
+    { "Broadcast Pin", {
+        { "thresh",     -14.0f },
+        { "ratio",        2.2f },
+        { "attack",       4.0f },
+        { "release",    140.0f },
+        { "deess_freq", 5800.0f },
+        { "deess_amount", 0.5f },
+        { "mix",          0.78f },
+        { kParamInput,   -1.0f },
+        { kParamOutput,   0.0f },
+        { kParamBypass,   0.0f }
+    }}
+}};
+
 DYNVocalPinAudioProcessor::DYNVocalPinAudioProcessor()
-    : AudioProcessor (BusesProperties()
+    : DualPrecisionAudioProcessor (BusesProperties()
                         .withInput  ("Input", juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
-      apvts (*this, nullptr, "VOCAL_PIN", createParameterLayout())
+      apvts (*this, nullptr, kStateId, createParameterLayout())
 {
 }
 
@@ -39,6 +86,13 @@ void DYNVocalPinAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const auto deEssFreq   = get ("deess_freq");
     const auto deEssAmount = juce::jlimit (0.0f, 1.0f, get ("deess_amount"));
     const auto mix         = juce::jlimit (0.0f, 1.0f, get ("mix"));
+    const auto inputGain   = juce::Decibels::decibelsToGain (get (kParamInput));
+    const auto outputGain  = juce::Decibels::decibelsToGain (get (kParamOutput));
+    const bool bypassed    = get (kParamBypass) > 0.5f;
+
+    buffer.applyGain (inputGain);
+    if (bypassed)
+        return;
 
     dryBuffer.makeCopyOf (buffer, true);
     lastBlockSize = (juce::uint32) juce::jmax (1, buffer.getNumSamples());
@@ -91,15 +145,17 @@ void DYNVocalPinAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         auto* wet = buffer.getWritePointer (ch);
         const auto* dry = dryBuffer.getReadPointer (ch);
         for (int i = 0; i < numSamples; ++i)
-            wet[i] = wet[i] * mix + dry[i] * (1.0f - mix);
+            wet[i] = (wet[i] * mix + dry[i] * (1.0f - mix)) * outputGain;
     }
 }
 
 void DYNVocalPinAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    auto state = apvts.copyState();
+    if (auto state = apvts.copyState(); state.isValid())
+    {
         juce::MemoryOutputStream stream (destData, false);
         state.writeToStream (stream);
+    }
 }
 
 void DYNVocalPinAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
@@ -128,64 +184,125 @@ DYNVocalPinAudioProcessor::createParameterLayout()
                                                                    juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.5f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> ("mix",        "Mix",
                                                                    juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 1.0f));
+    params.push_back (std::make_unique<juce::AudioParameterFloat> (kParamInput,  "Input Trim",
+                                                                   juce::NormalisableRange<float> (-18.0f, 18.0f, 0.1f), 0.0f));
+    params.push_back (std::make_unique<juce::AudioParameterFloat> (kParamOutput, "Output Trim",
+                                                                   juce::NormalisableRange<float> (-18.0f, 18.0f, 0.1f), 0.0f));
+    params.push_back (std::make_unique<juce::AudioParameterBool>  (kParamBypass, "Soft Bypass", false));
 
     return { params.begin(), params.end() };
 }
 
 DYNVocalPinAudioProcessorEditor::DYNVocalPinAudioProcessorEditor (DYNVocalPinAudioProcessor& p)
-    : juce::AudioProcessorEditor (&p), processorRef (p)
+    : juce::AudioProcessorEditor (&p), processorRef (p),
+      accentColour (gls::ui::accentForFamily ("DYN")),
+      headerComponent ("DYN.VocalPin", "Vocal Pin")
 {
-    auto make = [this](juce::Slider& s, const juce::String& label) { initSlider (s, label); };
+    lookAndFeel.setAccentColour (accentColour);
+    setLookAndFeel (&lookAndFeel);
+    headerComponent.setAccentColour (accentColour);
+    footerComponent.setAccentColour (accentColour);
 
-    make (threshSlider,     "Thresh");
-    make (ratioSlider,      "Ratio");
+    addAndMakeVisible (headerComponent);
+    addAndMakeVisible (footerComponent);
+
+    auto make = [this](juce::Slider& s, const juce::String& l, bool macro = false) { initSlider (s, l, macro); };
+
+    make (threshSlider,     "Thresh", true);
+    make (ratioSlider,      "Ratio", true);
     make (attackSlider,     "Attack");
     make (releaseSlider,    "Release");
     make (deEssFreqSlider,  "DeEss Freq");
     make (deEssAmountSlider,"DeEss Amt");
     make (mixSlider,        "Mix");
+    make (inputTrimSlider,  "Input");
+    make (outputTrimSlider, "Output");
+    initToggle (bypassButton);
 
     auto& state = processorRef.getValueTreeState();
-    const juce::StringArray ids { "thresh", "ratio", "attack", "release", "deess_freq", "deess_amount", "mix" };
+    const juce::StringArray ids { "thresh", "ratio", "attack", "release", "deess_freq", "deess_amount", "mix", kParamInput, kParamOutput };
     juce::Slider* sliders[]      = { &threshSlider, &ratioSlider, &attackSlider, &releaseSlider,
-                                     &deEssFreqSlider, &deEssAmountSlider, &mixSlider };
+                                     &deEssFreqSlider, &deEssAmountSlider, &mixSlider, &inputTrimSlider, &outputTrimSlider };
 
     for (int i = 0; i < ids.size(); ++i)
         attachments.push_back (std::make_unique<SliderAttachment> (state, ids[i], *sliders[i]));
 
-    setSize (760, 320);
+    buttonAttachments.push_back (std::make_unique<ButtonAttachment> (state, kParamBypass, bypassButton));
+
+    setSize (820, 420);
 }
 
-void DYNVocalPinAudioProcessorEditor::initSlider (juce::Slider& slider, const juce::String& name)
+void DYNVocalPinAudioProcessorEditor::initSlider (juce::Slider& slider, const juce::String& name, bool macro)
 {
+    slider.setLookAndFeel (&lookAndFeel);
     slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 70, 18);
+    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, macro ? 72 : 64, 18);
     slider.setName (name);
     addAndMakeVisible (slider);
+
+    auto label = std::make_unique<juce::Label>();
+    label->setText (name, juce::dontSendNotification);
+    label->setJustificationType (juce::Justification::centred);
+    label->setColour (juce::Label::textColourId, gls::ui::Colours::text());
+    label->setFont (gls::ui::makeFont (12.0f));
+    addAndMakeVisible (*label);
+    labels.push_back (std::move (label));
+}
+
+void DYNVocalPinAudioProcessorEditor::initToggle (juce::ToggleButton& toggle)
+{
+    toggle.setLookAndFeel (&lookAndFeel);
+    toggle.setClickingTogglesState (true);
+    addAndMakeVisible (toggle);
+}
+
+void DYNVocalPinAudioProcessorEditor::layoutLabels()
+{
+    std::vector<juce::Slider*> sliders {
+        &threshSlider, &ratioSlider, &attackSlider, &releaseSlider,
+        &deEssFreqSlider, &deEssAmountSlider, &mixSlider, &inputTrimSlider, &outputTrimSlider
+    };
+
+    for (size_t i = 0; i < sliders.size() && i < labels.size(); ++i)
+    {
+        if (auto* slider = sliders[i])
+            labels[i]->setBounds (slider->getBounds().withHeight (18).translated (0, -20));
+    }
 }
 
 void DYNVocalPinAudioProcessorEditor::paint (juce::Graphics& g)
 {
-    g.fillAll (juce::Colours::darkgrey);
-    g.setColour (juce::Colours::white);
-    g.setFont (16.0f);
-    g.drawFittedText ("DYN Vocal Pin", getLocalBounds().removeFromTop (24), juce::Justification::centred, 1);
+    g.fillAll (gls::ui::Colours::background());
+    auto body = getLocalBounds().withTrimmedTop (64).withTrimmedBottom (64);
+    g.setColour (gls::ui::Colours::panel().darker (0.25f));
+    g.fillRoundedRectangle (body.toFloat().reduced (8.0f), 10.0f);
 }
 
 void DYNVocalPinAudioProcessorEditor::resized()
 {
-    auto area = getLocalBounds().reduced (10);
-    auto topRow = area.removeFromTop (area.getHeight() / 2);
+    auto bounds = getLocalBounds();
+    headerComponent.setBounds (bounds.removeFromTop (64));
+    footerComponent.setBounds (bounds.removeFromBottom (64));
 
-    auto layoutRow = [](juce::Rectangle<int> bounds, std::initializer_list<juce::Component*> comps)
-    {
-        auto width = bounds.getWidth() / static_cast<int> (comps.size());
-        for (auto* comp : comps)
-            comp->setBounds (bounds.removeFromLeft (width).reduced (8));
-    };
+    auto area = bounds.reduced (12);
+    auto topRow = area.removeFromTop (juce::roundToInt (area.getHeight() * 0.55f));
+    auto bottomRow = area;
 
-    layoutRow (topRow, { &threshSlider, &ratioSlider, &attackSlider, &releaseSlider });
-    layoutRow (area,   { &deEssFreqSlider, &deEssAmountSlider, &mixSlider });
+    auto topWidth = topRow.getWidth() / 4;
+    threshSlider .setBounds (topRow.removeFromLeft (topWidth).reduced (8));
+    ratioSlider  .setBounds (topRow.removeFromLeft (topWidth).reduced (8));
+    attackSlider .setBounds (topRow.removeFromLeft (topWidth).reduced (8));
+    releaseSlider.setBounds (topRow.removeFromLeft (topWidth).reduced (8));
+
+    auto bottomWidth = bottomRow.getWidth() / 5;
+    deEssFreqSlider  .setBounds (bottomRow.removeFromLeft (bottomWidth).reduced (8));
+    deEssAmountSlider.setBounds (bottomRow.removeFromLeft (bottomWidth).reduced (8));
+    mixSlider        .setBounds (bottomRow.removeFromLeft (bottomWidth).reduced (8));
+    inputTrimSlider  .setBounds (bottomRow.removeFromLeft (bottomWidth).reduced (8));
+    outputTrimSlider .setBounds (bottomRow.removeFromLeft (bottomWidth).reduced (8));
+
+    bypassButton.setBounds (footerComponent.getBounds().reduced (24, 12));
+    layoutLabels();
 }
 
 juce::AudioProcessorEditor* DYNVocalPinAudioProcessor::createEditor()
@@ -248,4 +365,47 @@ float DYNVocalPinAudioProcessor::computeGain (float levelDb, float threshDb, flo
     const float over = levelDb - threshDb;
     const float compressed = threshDb + over / ratio;
     return juce::Decibels::decibelsToGain (compressed - levelDb);
+}
+
+int DYNVocalPinAudioProcessor::getNumPrograms()
+{
+    return (int) presetBank.size();
+}
+
+const juce::String DYNVocalPinAudioProcessor::getProgramName (int index)
+{
+    if (juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return presetBank[(size_t) index].name;
+    return {};
+}
+
+void DYNVocalPinAudioProcessor::setCurrentProgram (int index)
+{
+    const int clamped = juce::jlimit (0, (int) presetBank.size() - 1, index);
+    if (clamped == currentPreset)
+        return;
+
+    currentPreset = clamped;
+    applyPreset (clamped);
+}
+
+void DYNVocalPinAudioProcessor::applyPreset (int index)
+{
+    if (! juce::isPositiveAndBelow (index, (int) presetBank.size()))
+        return;
+
+    const auto& preset = presetBank[(size_t) index];
+    for (const auto& entry : preset.params)
+    {
+        if (auto* param = apvts.getParameter (entry.first))
+        {
+            auto norm = param->getNormalisableRange().convertTo0to1 (entry.second);
+            param->setValueNotifyingHost (norm);
+        }
+    }
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new DYNVocalPinAudioProcessor();
 }
