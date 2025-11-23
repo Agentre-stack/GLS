@@ -3,3 +3,6 @@ GLS_Project/Builds/
 
 # macOS junk
 .DS_Store
+
+# Secrets
+google-services.json
